@@ -66,6 +66,9 @@ endif()
 option(LLAMA_OTEL "Enable OpenTelemetry trace export" OFF)
 
 if (LLAMA_OTEL)
+    # Follow the official opentelemetry-cpp getting started guide:
+    # Build opentelemetry-cpp, install to a local prefix, then pass
+    # -Dopentelemetry-cpp_DIR=<prefix>/lib/cmake/opentelemetry-cpp
     find_package(opentelemetry-cpp CONFIG REQUIRED)
     list(APPEND TARGET_SRCS server-otel.cpp server-otel.h)
 endif()
@@ -79,14 +82,9 @@ target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib
 
 if (LLAMA_OTEL)
     target_compile_definitions(${TARGET} PRIVATE LLAMA_OTEL)
-    target_link_libraries(${TARGET} PRIVATE
-        opentelemetry-cpp::trace
-        opentelemetry-cpp::otlp_http_exporter
-        opentelemetry-cpp::resources
-    )
+    target_link_libraries(${TARGET} PRIVATE ${OPENTELEMETRY_CPP_LIBRARIES})
     # server-context.cpp also needs the LLAMA_OTEL define for the span instrumentation
     target_compile_definitions(server-context PRIVATE LLAMA_OTEL)
-    target_include_directories(server-context PRIVATE ${OPENTELEMETRY_CPP_INCLUDE_DIRS})
 endif()
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
