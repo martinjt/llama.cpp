@@ -3091,8 +3091,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
 
 #ifdef LLAMA_OTEL
     // Start an OTel span, extracting W3C trace context from request headers
-    auto otel_span_ptr = otel_start_span("gen_ai.chat", req.headers);
+    std::string otel_op_name = (type == SERVER_TASK_TYPE_INFILL) ? "infill" : "chat";
     std::string otel_model_name = meta ? meta->model_name : "unknown";
+    auto otel_span_ptr = otel_start_span(otel_op_name + " " + otel_model_name, req.headers);
 #endif
 
     auto res = create_response();
@@ -3153,7 +3154,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     } catch (const std::exception & e) {
         res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
 #ifdef LLAMA_OTEL
-        otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, e.what());
+        otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = e.what()});
 #endif
         return res;
     }
@@ -3165,13 +3166,13 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         auto all_results = rd.wait_for_all(req.should_stop);
         if (all_results.is_terminated) {
 #ifdef LLAMA_OTEL
-            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "connection closed");
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "connection closed"});
 #endif
             return res; // connection is closed
         } else if (all_results.error) {
             res->error(all_results.error->to_json());
 #ifdef LLAMA_OTEL
-            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "inference error");
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "inference error"});
 #endif
             return res;
         } else {
@@ -3193,16 +3194,18 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         case STOP_TYPE_LIMIT: stop_reason = "length"; break;
                         default:              stop_reason = "";       break;
                     }
-                    otel_end_span(otel_span_ptr.get(),
-                        final_res->oaicompat_model.empty() ? otel_model_name : final_res->oaicompat_model,
-                        final_res->timings.prompt_n,
-                        final_res->timings.predicted_n,
-                        final_res->timings.prompt_ms,
-                        final_res->timings.predicted_ms,
-                        final_res->timings.prompt_per_second,
-                        final_res->timings.predicted_per_second,
-                        final_res->timings.cache_n,
-                        stop_reason);
+                    otel_end_span(otel_span_ptr.get(), {
+                        .model            = final_res->oaicompat_model.empty() ? otel_model_name : final_res->oaicompat_model,
+                        .input_tokens     = final_res->timings.prompt_n,
+                        .output_tokens    = final_res->timings.predicted_n,
+                        .prompt_ms        = final_res->timings.prompt_ms,
+                        .predicted_ms     = final_res->timings.predicted_ms,
+                        .prompt_per_second    = final_res->timings.prompt_per_second,
+                        .predicted_per_second = final_res->timings.predicted_per_second,
+                        .cache_tokens     = final_res->timings.cache_n,
+                        .finish_reason    = stop_reason,
+                        .operation_name   = otel_op_name,
+                    });
                 }
             }
 #endif
@@ -3229,7 +3232,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         if (first_result == nullptr) {
             GGML_ASSERT(req.should_stop());
 #ifdef LLAMA_OTEL
-            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "connection closed");
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "connection closed"});
 #endif
             return res; // connection is closed
         }
@@ -3237,7 +3240,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         if (first_result->is_error()) {
             res->error(first_result->to_json());
 #ifdef LLAMA_OTEL
-            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "inference error");
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "inference error"});
 #endif
             return res;
         }
@@ -3263,7 +3266,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // Transfer span ownership to the streaming lambda via shared_ptr
         auto otel_span_shared = std::shared_ptr<otel_span>(std::move(otel_span_ptr));
         auto otel_model_captured = otel_model_name;
-        res->next = [res_this = res.get(), res_type, &req, otel_span_shared, otel_model_captured](std::string & output) -> bool {
+        auto otel_op_captured = otel_op_name;
+        res->next = [res_this = res.get(), res_type, &req, otel_span_shared, otel_model_captured, otel_op_captured](std::string & output) -> bool {
 #else
         res->next = [res_this = res.get(), res_type, &req](std::string & output) -> bool {
 #endif
@@ -3281,6 +3285,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             try {
                 if (req.should_stop()) {
                     SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
+#ifdef LLAMA_OTEL
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "connection closed"});
+                    }
+#endif
                     return false; // should_stop condition met
                 }
 
@@ -3315,6 +3324,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 if (result == nullptr) {
                     SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
                     GGML_ASSERT(req.should_stop());
+#ifdef LLAMA_OTEL
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "connection closed"});
+                    }
+#endif
                     return false; // should_stop condition met
                 }
 
@@ -3323,6 +3337,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     json res_json = result->to_json();
                     output = format_error(res_type, res_json);
                     SRV_DBG("%s", "error received during streaming, terminating stream\n");
+#ifdef LLAMA_OTEL
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "inference error"});
+                    }
+#endif
                     return false; // terminate on error
                 } else {
                     GGML_ASSERT(
@@ -3340,16 +3359,18 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                             case STOP_TYPE_LIMIT: stop_reason = "length"; break;
                             default:              stop_reason = "";       break;
                         }
-                        otel_end_span(otel_span_shared.get(),
-                            final_res->oaicompat_model.empty() ? otel_model_captured : final_res->oaicompat_model,
-                            final_res->timings.prompt_n,
-                            final_res->timings.predicted_n,
-                            final_res->timings.prompt_ms,
-                            final_res->timings.predicted_ms,
-                            final_res->timings.prompt_per_second,
-                            final_res->timings.predicted_per_second,
-                            final_res->timings.cache_n,
-                            stop_reason);
+                        otel_end_span(otel_span_shared.get(), {
+                            .model            = final_res->oaicompat_model.empty() ? otel_model_captured : final_res->oaicompat_model,
+                            .input_tokens     = final_res->timings.prompt_n,
+                            .output_tokens    = final_res->timings.predicted_n,
+                            .prompt_ms        = final_res->timings.prompt_ms,
+                            .predicted_ms     = final_res->timings.predicted_ms,
+                            .prompt_per_second    = final_res->timings.prompt_per_second,
+                            .predicted_per_second = final_res->timings.predicted_per_second,
+                            .cache_tokens     = final_res->timings.cache_n,
+                            .finish_reason    = stop_reason,
+                            .operation_name   = otel_op_captured,
+                        });
                     }
 #endif
                     json res_json = result->to_json();
@@ -3370,7 +3391,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 output = format_error(res_type, error_json);
 #ifdef LLAMA_OTEL
                 if (otel_span_shared) {
-                    otel_end_span(otel_span_shared.get(), otel_model_captured, -1, -1, 0, 0, 0, 0, -1, "", true, e.what());
+                    otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = e.what()});
                 }
 #endif
                 // terminate on exception

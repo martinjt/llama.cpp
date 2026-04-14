@@ -10,14 +10,28 @@
 namespace opentelemetry {
 namespace trace {
     class Span;
-    class Scope;
 }
 }
 
-// Opaque handle for an active OTel span + scope
+// Attributes for ending a GenAI span
+struct otel_span_attrs {
+    std::string model;
+    int32_t input_tokens  = -1;
+    int32_t output_tokens = -1;
+    double prompt_ms          = 0;
+    double predicted_ms       = 0;
+    double prompt_per_second  = 0;
+    double predicted_per_second = 0;
+    int32_t cache_tokens  = -1;
+    std::string finish_reason;
+    std::string operation_name = "chat";
+    bool is_error = false;
+    std::string error_message;
+};
+
+// Opaque handle for an active OTel span
 struct otel_span {
     std::shared_ptr<opentelemetry::trace::Span> span;
-    std::unique_ptr<opentelemetry::trace::Scope> scope;
 
     ~otel_span();
 };
@@ -38,18 +52,6 @@ std::unique_ptr<otel_span> otel_start_span(
     const std::map<std::string, std::string> & headers);
 
 // Add GenAI attributes to the span and end it.
-void otel_end_span(
-    otel_span * span,
-    const std::string & model,
-    int32_t input_tokens,
-    int32_t output_tokens,
-    double prompt_ms,
-    double predicted_ms,
-    double prompt_per_second,
-    double predicted_per_second,
-    int32_t cache_tokens,
-    const std::string & finish_reason,
-    bool is_error = false,
-    const std::string & error_message = "");
+void otel_end_span(otel_span * span, const otel_span_attrs & attrs);
 
 #endif // LLAMA_OTEL

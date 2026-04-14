@@ -10,14 +10,16 @@
 #include <opentelemetry/trace/provider.h>
 #include <opentelemetry/trace/tracer.h>
 #include <opentelemetry/trace/span.h>
-#include <opentelemetry/trace/scope.h>
 #include <opentelemetry/trace/span_startoptions.h>
 #include <opentelemetry/trace/propagation/http_trace_context.h>
 #include <opentelemetry/context/propagation/global_propagator.h>
 #include <opentelemetry/context/propagation/text_map_propagator.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace trace_api  = opentelemetry::trace;
 namespace trace_sdk  = opentelemetry::sdk::trace;
@@ -26,14 +28,24 @@ namespace otlp       = opentelemetry::exporter::otlp;
 namespace context    = opentelemetry::context;
 namespace propagation = opentelemetry::context::propagation;
 
-// TextMapCarrier adapter for std::map<string,string> headers
+// Fix #1: Case-insensitive header lookup.
+// HTTP headers are case-insensitive (RFC 7230). Store lowercased keys.
 class HeaderCarrier : public propagation::TextMapCarrier {
 public:
-    explicit HeaderCarrier(const std::map<std::string, std::string> & headers)
-        : headers_(headers) {}
+    explicit HeaderCarrier(const std::map<std::string, std::string> & headers) {
+        for (const auto & h : headers) {
+            std::string lower_key = h.first;
+            std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(),
+                           [](unsigned char c) { return std::tolower(c); });
+            headers_[lower_key] = h.second;
+        }
+    }
 
     opentelemetry::nostd::string_view Get(opentelemetry::nostd::string_view key) const noexcept override {
-        auto it = headers_.find(std::string(key));
+        std::string lower_key(key);
+        std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        auto it = headers_.find(lower_key);
         if (it != headers_.end()) {
             return it->second;
         }
@@ -46,7 +58,7 @@ public:
     }
 
 private:
-    const std::map<std::string, std::string> & headers_;
+    std::map<std::string, std::string> headers_;
 };
 
 static const char * TRACER_NAME = "llama.cpp.server";
@@ -57,20 +69,20 @@ static std::string get_env(const char * name, const char * default_val) {
     return (val && val[0]) ? std::string(val) : std::string(default_val);
 }
 
+// Fix #3: Mark orphaned spans as errors in destructor
 otel_span::~otel_span() {
-    // Ensure span is ended if not already
     if (span) {
+        span->SetStatus(trace_api::StatusCode::kError, "span ended without completion");
         span->End();
     }
 }
 
+// Fix #5: Let the SDK handle OTEL_EXPORTER_OTLP_ENDPOINT automatically.
+// OtlpHttpExporterOptions reads the env var and appends /v1/traces itself.
+// We only manually handle OTEL_SERVICE_NAME since the SDK uses Resource for that.
 void otel_init() {
-    // Configure the OTLP HTTP exporter
     otlp::OtlpHttpExporterOptions exporter_opts;
-    // The SDK reads OTEL_EXPORTER_OTLP_ENDPOINT automatically via the options,
-    // but we set it explicitly for clarity
-    std::string endpoint = get_env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318");
-    exporter_opts.url = endpoint + "/v1/traces";
+    // SDK reads OTEL_EXPORTER_OTLP_ENDPOINT from environment automatically
 
     auto exporter = otlp::OtlpHttpExporterFactory::Create(exporter_opts);
 
@@ -106,6 +118,9 @@ void otel_shutdown() {
     }
 }
 
+// Fix #10: No Scope created — it would attach to the creating thread's context
+// but the span may be used from a different thread (streaming lambda).
+// Since no child spans are created, Scope is unnecessary.
 std::unique_ptr<otel_span> otel_start_span(
         const std::string & span_name,
         const std::map<std::string, std::string> & headers) {
@@ -123,61 +138,57 @@ std::unique_ptr<otel_span> otel_start_span(
     opts.parent = parent_ctx;
 
     auto span = tracer->StartSpan(span_name, {}, opts);
-    auto scope = std::make_unique<trace_api::Scope>(span);
 
     auto result = std::make_unique<otel_span>();
     result->span = std::move(span);
-    result->scope = std::move(scope);
     return result;
 }
 
-void otel_end_span(
-        otel_span * span,
-        const std::string & model,
-        int32_t input_tokens,
-        int32_t output_tokens,
-        double prompt_ms,
-        double predicted_ms,
-        double prompt_per_second,
-        double predicted_per_second,
-        int32_t cache_tokens,
-        const std::string & finish_reason,
-        bool is_error,
-        const std::string & error_message) {
+// Fix #6: struct-based attrs, #2: finish_reasons array, #7: gen_ai.system,
+// #8: span name "chat {model}", #9: operation name from attrs
+void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
     if (!span || !span->span) {
         return;
     }
 
     auto & s = span->span;
 
-    // GenAI semantic convention attributes
-    s->SetAttribute("gen_ai.operation.name", "chat");
-    s->SetAttribute("gen_ai.request.model", model);
-    s->SetAttribute("gen_ai.response.model", model);
+    // Fix #8: Update span name to "chat {model}" (or "{operation} {model}") per semconv
+    s->UpdateName(attrs.operation_name + " " + attrs.model);
 
-    if (input_tokens >= 0) {
-        s->SetAttribute("gen_ai.usage.input_tokens", static_cast<int64_t>(input_tokens));
+    // Fix #7: gen_ai.system attribute
+    s->SetAttribute("gen_ai.system", "llama_cpp");
+
+    // Fix #9: operation name from attrs (chat or infill)
+    s->SetAttribute("gen_ai.operation.name", attrs.operation_name);
+    s->SetAttribute("gen_ai.request.model", attrs.model);
+    s->SetAttribute("gen_ai.response.model", attrs.model);
+
+    if (attrs.input_tokens >= 0) {
+        s->SetAttribute("gen_ai.usage.input_tokens", static_cast<int64_t>(attrs.input_tokens));
     }
-    if (output_tokens >= 0) {
-        s->SetAttribute("gen_ai.usage.output_tokens", static_cast<int64_t>(output_tokens));
+    if (attrs.output_tokens >= 0) {
+        s->SetAttribute("gen_ai.usage.output_tokens", static_cast<int64_t>(attrs.output_tokens));
     }
 
     // llama.cpp specific timing attributes
-    s->SetAttribute("llama.prompt_ms", prompt_ms);
-    s->SetAttribute("llama.predicted_ms", predicted_ms);
-    s->SetAttribute("llama.prompt_per_second", prompt_per_second);
-    s->SetAttribute("llama.predicted_per_second", predicted_per_second);
+    s->SetAttribute("llama.prompt_ms", attrs.prompt_ms);
+    s->SetAttribute("llama.predicted_ms", attrs.predicted_ms);
+    s->SetAttribute("llama.prompt_per_second", attrs.prompt_per_second);
+    s->SetAttribute("llama.predicted_per_second", attrs.predicted_per_second);
 
-    if (cache_tokens >= 0) {
-        s->SetAttribute("llama.cache_tokens", static_cast<int64_t>(cache_tokens));
+    if (attrs.cache_tokens >= 0) {
+        s->SetAttribute("llama.cache_tokens", static_cast<int64_t>(attrs.cache_tokens));
     }
 
-    if (!finish_reason.empty()) {
-        s->SetAttribute("gen_ai.response.finish_reasons", finish_reason);
+    // Fix #2: finish_reasons must be an array per semconv
+    if (!attrs.finish_reason.empty()) {
+        s->SetAttribute("gen_ai.response.finish_reasons",
+                         std::vector<std::string>{attrs.finish_reason});
     }
 
-    if (is_error) {
-        s->SetStatus(trace_api::StatusCode::kError, error_message);
+    if (attrs.is_error) {
+        s->SetStatus(trace_api::StatusCode::kError, attrs.error_message);
     }
 
     s->End();
