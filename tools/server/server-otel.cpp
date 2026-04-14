@@ -181,10 +181,13 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
         s->SetAttribute("gen_ai.usage.cache_read.input_tokens", static_cast<int64_t>(attrs.cache_tokens));
     }
 
-    // Fix #2: finish_reasons must be an array per semconv
+    // finish_reasons must be an array per semconv; use nostd::span for AttributeValue compatibility
     if (!attrs.finish_reason.empty()) {
+        opentelemetry::nostd::string_view reasons[] = {
+            opentelemetry::nostd::string_view(attrs.finish_reason)
+        };
         s->SetAttribute("gen_ai.response.finish_reasons",
-                         std::vector<std::string>{attrs.finish_reason});
+            opentelemetry::nostd::span<const opentelemetry::nostd::string_view>(reasons, 1));
     }
 
     if (attrs.is_error) {
