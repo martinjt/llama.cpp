@@ -130,7 +130,8 @@ std::unique_ptr<otel_span> otel_start_span(
     // Extract parent context from incoming headers (W3C traceparent)
     header_carrier carrier(headers);
     auto propagator = propagation::GlobalTextMapPropagator::GetGlobalPropagator();
-    auto parent_ctx = propagator->Extract(carrier, context::RuntimeContext::GetCurrent());
+    auto current_ctx = context::RuntimeContext::GetCurrent();
+    auto parent_ctx = propagator->Extract(carrier, current_ctx);
 
     // Start a SERVER span as a child of the extracted context
     trace_api::StartSpanOptions opts;
