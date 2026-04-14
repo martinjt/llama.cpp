@@ -156,8 +156,8 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
     // Fix #8: Update span name to "chat {model}" (or "{operation} {model}") per semconv
     s->UpdateName(attrs.operation_name + " " + attrs.model);
 
-    // Fix #7: gen_ai.system attribute
-    s->SetAttribute("gen_ai.system", "llama_cpp");
+    // gen_ai.provider.name (renamed from gen_ai.system in semconv)
+    s->SetAttribute("gen_ai.provider.name", "llama_cpp");
 
     // Fix #9: operation name from attrs (chat or infill)
     s->SetAttribute("gen_ai.operation.name", attrs.operation_name);
@@ -178,7 +178,7 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
     s->SetAttribute("llama.predicted_per_second", attrs.predicted_per_second);
 
     if (attrs.cache_tokens >= 0) {
-        s->SetAttribute("llama.cache_tokens", static_cast<int64_t>(attrs.cache_tokens));
+        s->SetAttribute("gen_ai.usage.cache_read.input_tokens", static_cast<int64_t>(attrs.cache_tokens));
     }
 
     // Fix #2: finish_reasons must be an array per semconv
@@ -189,6 +189,9 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
 
     if (attrs.is_error) {
         s->SetStatus(trace_api::StatusCode::kError, attrs.error_message);
+        if (!attrs.error_message.empty()) {
+            s->SetAttribute("error.type", attrs.error_message);
+        }
     }
 
     s->End();
