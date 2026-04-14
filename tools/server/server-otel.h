@@ -1,17 +1,8 @@
 #pragma once
 
-#ifdef LLAMA_OTEL
-
 #include <string>
 #include <map>
 #include <memory>
-
-// Forward declare OTel types to avoid header pollution
-namespace opentelemetry {
-namespace trace {
-    class Span;
-}
-}
 
 // Attributes for ending a GenAI span
 struct otel_span_attrs {
@@ -28,6 +19,15 @@ struct otel_span_attrs {
     bool is_error = false;
     std::string error_message;
 };
+
+#ifdef LLAMA_OTEL
+
+// Forward declare OTel types to avoid header pollution
+namespace opentelemetry {
+namespace trace {
+    class Span;
+}
+}
 
 // Opaque handle for an active OTel span
 struct otel_span {
@@ -53,5 +53,21 @@ std::unique_ptr<otel_span> otel_start_span(
 
 // Add GenAI attributes to the span and end it.
 void otel_end_span(otel_span * span, const otel_span_attrs & attrs);
+
+#else // !LLAMA_OTEL
+
+// No-op stubs when OTel is disabled — eliminates #ifdef scatter in call sites
+struct otel_span {};
+
+inline void otel_init() {}
+inline void otel_shutdown() {}
+
+inline std::unique_ptr<otel_span> otel_start_span(
+        const std::string & /*span_name*/,
+        const std::map<std::string, std::string> & /*headers*/) {
+    return nullptr;
+}
+
+inline void otel_end_span(otel_span * /*span*/, const otel_span_attrs & /*attrs*/) {}
 
 #endif // LLAMA_OTEL

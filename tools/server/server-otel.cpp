@@ -30,9 +30,9 @@ namespace propagation = opentelemetry::context::propagation;
 
 // Fix #1: Case-insensitive header lookup.
 // HTTP headers are case-insensitive (RFC 7230). Store lowercased keys.
-class HeaderCarrier : public propagation::TextMapCarrier {
+class header_carrier : public propagation::TextMapCarrier {
 public:
-    explicit HeaderCarrier(const std::map<std::string, std::string> & headers) {
+    explicit header_carrier(const std::map<std::string, std::string> & headers) {
         for (const auto & h : headers) {
             std::string lower_key = h.first;
             std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(),
@@ -128,7 +128,7 @@ std::unique_ptr<otel_span> otel_start_span(
     auto tracer = provider->GetTracer(TRACER_NAME);
 
     // Extract parent context from incoming headers (W3C traceparent)
-    HeaderCarrier carrier(headers);
+    header_carrier carrier(headers);
     auto propagator = propagation::GlobalTextMapPropagator::GetGlobalPropagator();
     auto parent_ctx = propagator->Extract(carrier, context::RuntimeContext::GetCurrent());
 
