@@ -97,9 +97,10 @@ void otel_init() {
     };
     auto otel_resource = resource::Resource::Create(resource_attrs);
 
-    // Create TracerProvider
+    // Create TracerProvider — wrap in nostd::shared_ptr for SetTracerProvider (WITH_STL=OFF)
     auto provider = trace_sdk::TracerProviderFactory::Create(std::move(processor), otel_resource);
-    trace_api::Provider::SetTracerProvider(std::move(provider));
+    trace_api::Provider::SetTracerProvider(
+        opentelemetry::nostd::shared_ptr<trace_api::TracerProvider>(provider.release()));
 
     // Set up W3C TraceContext propagator
     propagation::GlobalTextMapPropagator::SetGlobalPropagator(
