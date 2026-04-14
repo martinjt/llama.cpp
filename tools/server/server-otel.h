@@ -22,14 +22,10 @@ struct otel_span_attrs {
 
 #ifdef LLAMA_OTEL
 
-// Forward declare OTel types to avoid header pollution
-namespace opentelemetry {
-namespace trace {
-    class Span;
-}
-}
+// Opaque handle for an active OTel span — destructor defined in server-otel.cpp
+// We include the full Span header because shared_ptr needs a complete type for deletion.
+#include <opentelemetry/trace/span.h>
 
-// Opaque handle for an active OTel span
 struct otel_span {
     std::shared_ptr<opentelemetry::trace::Span> span;
 
