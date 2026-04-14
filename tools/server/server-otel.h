@@ -23,11 +23,11 @@ struct otel_span_attrs {
 #ifdef LLAMA_OTEL
 
 // Opaque handle for an active OTel span — destructor defined in server-otel.cpp
-// We include the full Span header because shared_ptr needs a complete type for deletion.
 #include <opentelemetry/trace/span.h>
+#include <opentelemetry/nostd/shared_ptr.h>
 
 struct otel_span {
-    std::shared_ptr<opentelemetry::trace::Span> span;
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
 
     ~otel_span();
 };
