@@ -4,6 +4,10 @@
 #include "server-task.h"
 #include "server-queue.h"
 
+#ifdef LLAMA_OTEL
+#include "server-otel.h"
+#endif
+
 #include "common.h"
 #include "llama.h"
 #include "log.h"
@@ -3085,6 +3089,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task_response_type res_type) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
+#ifdef LLAMA_OTEL
+    // Start an OTel span, extracting W3C trace context from request headers
+    auto otel_span_ptr = otel_start_span("gen_ai.chat", req.headers);
+    std::string otel_model_name = meta ? meta->model_name : "unknown";
+#endif
+
     auto res = create_response();
     auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
@@ -3142,6 +3152,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         rd.post_tasks(std::move(tasks));
     } catch (const std::exception & e) {
         res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+#ifdef LLAMA_OTEL
+        otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, e.what());
+#endif
         return res;
     }
 
@@ -3151,9 +3164,15 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // non-stream, wait for the results
         auto all_results = rd.wait_for_all(req.should_stop);
         if (all_results.is_terminated) {
+#ifdef LLAMA_OTEL
+            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "connection closed");
+#endif
             return res; // connection is closed
         } else if (all_results.error) {
             res->error(all_results.error->to_json());
+#ifdef LLAMA_OTEL
+            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "inference error");
+#endif
             return res;
         } else {
             json arr = json::array();
@@ -3162,6 +3181,31 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 arr.push_back(res->to_json());
             }
             GGML_ASSERT(!arr.empty() && "empty results");
+#ifdef LLAMA_OTEL
+            // Extract timing info from the first final result for the span
+            if (!all_results.results.empty()) {
+                auto * final_res = dynamic_cast<server_task_result_cmpl_final *>(all_results.results[0].get());
+                if (final_res) {
+                    std::string stop_reason;
+                    switch (final_res->stop) {
+                        case STOP_TYPE_EOS:   stop_reason = "stop";   break;
+                        case STOP_TYPE_WORD:  stop_reason = "stop";   break;
+                        case STOP_TYPE_LIMIT: stop_reason = "length"; break;
+                        default:              stop_reason = "";       break;
+                    }
+                    otel_end_span(otel_span_ptr.get(),
+                        final_res->oaicompat_model.empty() ? otel_model_name : final_res->oaicompat_model,
+                        final_res->timings.prompt_n,
+                        final_res->timings.predicted_n,
+                        final_res->timings.prompt_ms,
+                        final_res->timings.predicted_ms,
+                        final_res->timings.prompt_per_second,
+                        final_res->timings.predicted_per_second,
+                        final_res->timings.cache_n,
+                        stop_reason);
+                }
+            }
+#endif
             if (arr.size() == 1) {
                 // if single request, return single object instead of array
                 res->ok(arr[0]);
@@ -3184,11 +3228,17 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         auto first_result = rd.next(req.should_stop);
         if (first_result == nullptr) {
             GGML_ASSERT(req.should_stop());
+#ifdef LLAMA_OTEL
+            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "connection closed");
+#endif
             return res; // connection is closed
         }
 
         if (first_result->is_error()) {
             res->error(first_result->to_json());
+#ifdef LLAMA_OTEL
+            otel_end_span(otel_span_ptr.get(), otel_model_name, -1, -1, 0, 0, 0, 0, -1, "", true, "inference error");
+#endif
             return res;
         }
 
@@ -3209,7 +3259,14 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         }
         res->status = 200;
         res->content_type = "text/event-stream";
+#ifdef LLAMA_OTEL
+        // Transfer span ownership to the streaming lambda via shared_ptr
+        auto otel_span_shared = std::shared_ptr<otel_span>(std::move(otel_span_ptr));
+        auto otel_model_captured = otel_model_name;
+        res->next = [res_this = res.get(), res_type, &req, otel_span_shared, otel_model_captured](std::string & output) -> bool {
+#else
         res->next = [res_this = res.get(), res_type, &req](std::string & output) -> bool {
+#endif
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                     return format_anthropic_sse({
@@ -3272,6 +3329,29 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         dynamic_cast<server_task_result_cmpl_partial*>(result.get()) != nullptr
                         || dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr
                     );
+#ifdef LLAMA_OTEL
+                    // End span with timing data when the final result arrives
+                    auto * final_res = dynamic_cast<server_task_result_cmpl_final *>(result.get());
+                    if (final_res && otel_span_shared) {
+                        std::string stop_reason;
+                        switch (final_res->stop) {
+                            case STOP_TYPE_EOS:   stop_reason = "stop";   break;
+                            case STOP_TYPE_WORD:  stop_reason = "stop";   break;
+                            case STOP_TYPE_LIMIT: stop_reason = "length"; break;
+                            default:              stop_reason = "";       break;
+                        }
+                        otel_end_span(otel_span_shared.get(),
+                            final_res->oaicompat_model.empty() ? otel_model_captured : final_res->oaicompat_model,
+                            final_res->timings.prompt_n,
+                            final_res->timings.predicted_n,
+                            final_res->timings.prompt_ms,
+                            final_res->timings.predicted_ms,
+                            final_res->timings.prompt_per_second,
+                            final_res->timings.predicted_per_second,
+                            final_res->timings.cache_n,
+                            stop_reason);
+                    }
+#endif
                     json res_json = result->to_json();
                     if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                         output = format_anthropic_sse(res_json);
@@ -3288,7 +3368,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             } catch (const std::exception & e) {
                 json error_json = format_error_response(e.what(), ERROR_TYPE_SERVER);
                 output = format_error(res_type, error_json);
-
+#ifdef LLAMA_OTEL
+                if (otel_span_shared) {
+                    otel_end_span(otel_span_shared.get(), otel_model_captured, -1, -1, 0, 0, 0, 0, -1, "", true, e.what());
+                }
+#endif
                 // terminate on exception
                 return false;
             }

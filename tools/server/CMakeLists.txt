@@ -63,11 +63,30 @@ if (LLAMA_BUILD_WEBUI)
 else()
 endif()
 
+option(LLAMA_OTEL "Enable OpenTelemetry trace export" OFF)
+
+if (LLAMA_OTEL)
+    find_package(opentelemetry-cpp CONFIG REQUIRED)
+    list(APPEND TARGET_SRCS server-otel.cpp server-otel.h)
+endif()
+
 add_executable(${TARGET} ${TARGET_SRCS})
 install(TARGETS ${TARGET} RUNTIME)
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib ${CMAKE_THREAD_LIBS_INIT})
+
+if (LLAMA_OTEL)
+    target_compile_definitions(${TARGET} PRIVATE LLAMA_OTEL)
+    target_link_libraries(${TARGET} PRIVATE
+        opentelemetry-cpp::trace
+        opentelemetry-cpp::otlp_http_exporter
+        opentelemetry-cpp::resources
+    )
+    # server-context.cpp also needs the LLAMA_OTEL define for the span instrumentation
+    target_compile_definitions(server-context PRIVATE LLAMA_OTEL)
+    target_include_directories(server-context PRIVATE ${OPENTELEMETRY_CPP_INCLUDE_DIRS})
+endif()
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

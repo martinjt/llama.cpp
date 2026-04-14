@@ -4,6 +4,10 @@
 #include "server-cors-proxy.h"
 #include "server-tools.h"
 
+#ifdef LLAMA_OTEL
+#include "server-otel.h"
+#endif
+
 #include "arg.h"
 #include "common.h"
 #include "llama.h"
@@ -76,6 +80,11 @@ int main(int argc, char ** argv) {
     common_params params;
 
     common_init();
+
+#ifdef LLAMA_OTEL
+    otel_init();
+    LOG_INF("%s: OpenTelemetry tracing enabled\n", __func__);
+#endif
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SERVER)) {
         return 1;
@@ -237,6 +246,9 @@ int main(int argc, char ** argv) {
 
         clean_up = [&models_routes]() {
             SRV_INF("%s: cleaning up before exit...\n", __func__);
+#ifdef LLAMA_OTEL
+            otel_shutdown();
+#endif
             if (models_routes.has_value()) {
                 models_routes->models.unload_all();
             }
@@ -258,6 +270,9 @@ int main(int argc, char ** argv) {
         // setup clean up function, to be called before exit
         clean_up = [&ctx_http, &ctx_server]() {
             SRV_INF("%s: cleaning up before exit...\n", __func__);
+#ifdef LLAMA_OTEL
+            otel_shutdown();
+#endif
             ctx_http.stop();
             ctx_server.terminate();
             llama_backend_free();
