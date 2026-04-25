@@ -315,9 +315,9 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
         std::string separator = ", ";  // Default
         if (inputs.parallel_tool_calls) {
             tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice +
-                                                         p.zero_or_more(separator + tool_choice) + format.section_end);
+                                                         p.zero_or_more(separator + tool_choice) + format.section_end + p.space());
         } else {
-            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice + format.section_end);
+            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice + format.section_end + p.space());
         }
     }
 
