@@ -143,6 +143,13 @@ std::unique_ptr<otel_span> otel_start_span(
 
     auto result = std::make_unique<otel_span>();
     result->span = std::move(span);
+
+    // Set session.id from x-session-affinity header if present
+    auto session_id = carrier.Get("x-session-affinity");
+    if (!session_id.empty()) {
+        result->span->SetAttribute("session.id", std::string(session_id));
+    }
+
     return result;
 }
 
