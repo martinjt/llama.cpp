@@ -83,8 +83,10 @@ target_link_libraries(${TARGET} PRIVATE server-context PUBLIC common cpp-httplib
 if (LLAMA_OTEL)
     target_compile_definitions(${TARGET} PRIVATE LLAMA_OTEL)
     target_link_libraries(${TARGET} PRIVATE ${OPENTELEMETRY_CPP_LIBRARIES})
-    # server-context.cpp also needs the LLAMA_OTEL define for the span instrumentation
+    # server-context.cpp also needs the LLAMA_OTEL define and opentelemetry-cpp
+    # include path for the span instrumentation in server-otel.h
     target_compile_definitions(server-context PRIVATE LLAMA_OTEL)
+    target_link_libraries(server-context PRIVATE ${OPENTELEMETRY_CPP_LIBRARIES})
 endif()
 
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
