@@ -69,6 +69,10 @@ if (LLAMA_OTEL)
     # Follow the official opentelemetry-cpp getting started guide:
     # Build opentelemetry-cpp, install to a local prefix, then pass
     # -Dopentelemetry-cpp_DIR=<prefix>/lib/cmake/opentelemetry-cpp
+    # opentelemetry-cpp-target.cmake references the CURL::libcurl imported
+    # target from CMake's own FindCURL module without exporting it, so
+    # the consumer must find_package(CURL) first.
+    find_package(CURL REQUIRED)
     find_package(opentelemetry-cpp CONFIG REQUIRED)
     list(APPEND TARGET_SRCS server-otel.cpp server-otel.h)
 endif()
