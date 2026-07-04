@@ -6,6 +6,7 @@
 #include "server-queue.h"
 #include "server-schema.h"
 #include "server-stream.h"
+#include "server-otel.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -4084,6 +4085,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task_response_type res_type) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
+    // Start an OTel span, extracting W3C trace context from request headers
+    std::string otel_op_name = (type == SERVER_TASK_TYPE_INFILL) ? "infill" : "chat";
+    std::string otel_model_name = meta ? meta->model_name : "unknown";
+    auto otel_span_ptr = otel_start_span(otel_op_name + " " + otel_model_name, req.headers);
+
     auto res = create_response();
     auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
@@ -4162,6 +4168,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         rd.post_tasks(std::move(tasks));
     } catch (const std::exception & e) {
         res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+        otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = e.what()});
         return res;
     }
 
@@ -4171,9 +4178,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // non-stream, wait for the results
         auto all_results = rd.wait_for_all(req.should_stop);
         if (all_results.is_terminated) {
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "connection closed"});
             return res; // connection is closed
         } else if (all_results.error) {
             res->error(all_results.error->to_json());
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "inference error"});
             return res;
         } else {
             json arr = json::array();
@@ -4182,6 +4191,31 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 arr.push_back(res->to_json());
             }
             GGML_ASSERT(!arr.empty() && "empty results");
+            // Extract timing info from the first final result for the span
+            if (!all_results.results.empty()) {
+                auto * final_res = dynamic_cast<server_task_result_cmpl_final *>(all_results.results[0].get());
+                if (final_res) {
+                    std::string stop_reason;
+                    switch (final_res->stop) {
+                        case STOP_TYPE_EOS:   stop_reason = "stop";   break;
+                        case STOP_TYPE_WORD:  stop_reason = "stop";   break;
+                        case STOP_TYPE_LIMIT: stop_reason = "length"; break;
+                        default:              stop_reason = "";       break;
+                    }
+                    otel_end_span(otel_span_ptr.get(), {
+                        .model            = final_res->oaicompat_model.empty() ? otel_model_name : final_res->oaicompat_model,
+                        .input_tokens     = final_res->timings.prompt_n,
+                        .output_tokens    = final_res->timings.predicted_n,
+                        .prompt_ms        = final_res->timings.prompt_ms,
+                        .predicted_ms     = final_res->timings.predicted_ms,
+                        .prompt_per_second    = final_res->timings.prompt_per_second,
+                        .predicted_per_second = final_res->timings.predicted_per_second,
+                        .cache_tokens     = final_res->timings.cache_n,
+                        .finish_reason    = stop_reason,
+                        .operation_name   = otel_op_name,
+                    });
+                }
+            }
             if (arr.size() == 1) {
                 // if single request, return single object instead of array
                 res->ok(arr[0]);
@@ -4204,11 +4238,13 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         auto first_result = rd.next(req.should_stop);
         if (first_result == nullptr) {
             GGML_ASSERT(req.should_stop());
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "connection closed"});
             return res; // connection is closed
         }
 
         if (first_result->is_error()) {
             res->error(first_result->to_json());
+            otel_end_span(otel_span_ptr.get(), {.model = otel_model_name, .operation_name = otel_op_name, .is_error = true, .error_message = "inference error"});
             return res;
         }
 
@@ -4231,7 +4267,14 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         }
         res->status = 200;
         res->content_type = "text/event-stream";
-        res->next = [res_this = res.get(), res_type, sse_ping_interval, &req](std::string & output) -> bool {
+        // Transfer span ownership into the streaming lambda via shared_ptr so the
+        // span stays alive for the full stream duration. otel_end_span() at each
+        // terminal path ends it (and nulls the handle so ~otel_span is a no-op);
+        // if the stream tears down without hitting one, ~otel_span marks it orphaned.
+        auto otel_span_shared = std::shared_ptr<otel_span>(std::move(otel_span_ptr));
+        auto otel_model_captured = otel_model_name;
+        auto otel_op_captured = otel_op_name;
+        res->next = [res_this = res.get(), res_type, sse_ping_interval, &req, otel_span_shared, otel_model_captured, otel_op_captured](std::string & output) -> bool {
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                     return format_anthropic_sse({
@@ -4248,6 +4291,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             try {
                 if (effective_should_stop()) {
                     SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "connection closed"});
+                    }
                     return false; // should_stop condition met
                 }
 
@@ -4300,6 +4346,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 if (result == nullptr) {
                     SRV_DBG("%s", "stopping streaming due to should_stop condition\n");
                     GGML_ASSERT(effective_should_stop());
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "connection closed"});
+                    }
                     return false; // should_stop condition met
                 }
 
@@ -4308,12 +4357,38 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                     json res_json = result->to_json();
                     output = format_error(res_type, res_json);
                     SRV_DBG("%s", "error received during streaming, terminating stream\n");
+                    if (otel_span_shared) {
+                        otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = "inference error"});
+                    }
                     return false; // terminate on error
                 } else {
                     GGML_ASSERT(
                         dynamic_cast<server_task_result_cmpl_partial*>(result.get()) != nullptr
                         || dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr
                     );
+                    // End span with timing data when the final result arrives
+                    auto * final_res = dynamic_cast<server_task_result_cmpl_final *>(result.get());
+                    if (final_res && otel_span_shared) {
+                        std::string stop_reason;
+                        switch (final_res->stop) {
+                            case STOP_TYPE_EOS:   stop_reason = "stop";   break;
+                            case STOP_TYPE_WORD:  stop_reason = "stop";   break;
+                            case STOP_TYPE_LIMIT: stop_reason = "length"; break;
+                            default:              stop_reason = "";       break;
+                        }
+                        otel_end_span(otel_span_shared.get(), {
+                            .model            = final_res->oaicompat_model.empty() ? otel_model_captured : final_res->oaicompat_model,
+                            .input_tokens     = final_res->timings.prompt_n,
+                            .output_tokens    = final_res->timings.predicted_n,
+                            .prompt_ms        = final_res->timings.prompt_ms,
+                            .predicted_ms     = final_res->timings.predicted_ms,
+                            .prompt_per_second    = final_res->timings.prompt_per_second,
+                            .predicted_per_second = final_res->timings.predicted_per_second,
+                            .cache_tokens     = final_res->timings.cache_n,
+                            .finish_reason    = stop_reason,
+                            .operation_name   = otel_op_captured,
+                        });
+                    }
                     json res_json = result->to_json();
                     if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                         output = format_anthropic_sse(res_json);
@@ -4330,7 +4405,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             } catch (const std::exception & e) {
                 json error_json = format_error_response(e.what(), ERROR_TYPE_SERVER);
                 output = format_error(res_type, error_json);
-
+                if (otel_span_shared) {
+                    otel_end_span(otel_span_shared.get(), {.model = otel_model_captured, .operation_name = otel_op_captured, .is_error = true, .error_message = e.what()});
+                }
                 // terminate on exception
                 return false;
             }

@@ -31,6 +31,28 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
 
+option(LLAMA_OTEL "Enable OpenTelemetry trace export" OFF)
+
+if (LLAMA_OTEL)
+    # Follow the official opentelemetry-cpp getting started guide: build
+    # opentelemetry-cpp, install to a local prefix, then pass
+    # -Dopentelemetry-cpp_DIR=<prefix>/lib/cmake/opentelemetry-cpp.
+    # opentelemetry-cpp-target.cmake references the CURL::libcurl imported
+    # target from CMake's own FindCURL module without exporting it, so the
+    # consumer must find_package(CURL) first.
+    find_package(CURL REQUIRED)
+    find_package(opentelemetry-cpp CONFIG REQUIRED)
+    # server-otel lives in the server-context library because both
+    # server-context.cpp (span start/end) and server.cpp (init/shutdown, in
+    # llama-server-impl) call into it. The define/includes/libs are PUBLIC so
+    # they propagate up to llama-server-impl and the executable, keeping the
+    # LLAMA_OTEL-guarded otel_span layout in server-otel.h consistent across
+    # every TU that includes it (avoids an ODR mismatch).
+    target_sources(server-context PRIVATE server-otel.cpp server-otel.h)
+    target_compile_definitions(server-context PUBLIC LLAMA_OTEL)
+    target_link_libraries(server-context PUBLIC ${OPENTELEMETRY_CPP_LIBRARIES})
+endif()
+
 # llama-server-impl: server logic, reusable by app
 
 set(TARGET llama-server-impl)
