@@ -85,7 +85,11 @@ int llama_server(int argc, char ** argv) {
     common_init();
 
     otel_init();
+#ifdef LLAMA_OTEL
     LOG_INF("%s: OpenTelemetry tracing enabled\n", __func__);
+#else
+    LOG_INF("%s: OpenTelemetry tracing disabled (built without LLAMA_OTEL)\n", __func__);
+#endif
 
     // start the stream session manager GC right after common init, before any HTTP route can
     // touch it. lifecycle is symmetric, stop_gc() runs in clean_up() before backend free

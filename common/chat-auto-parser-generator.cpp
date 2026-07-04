@@ -442,6 +442,20 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
 
         // Only peek for an arg tag when there are required args that must follow.
         // When all args are optional, the model may emit no arg tags at all (#20650).
+        //
+        // NOTE: since the flexible-param-ordering port above (all params pushed into
+        // optional_parsers, `is_required` intentionally ignored), `required_parsers` is
+        // *always* empty — it is declared but never populated. That means `atomic_peek`
+        // is now unconditionally std::nullopt for every tool, not just tools whose schema
+        // has zero required params. Tracing into build_func_parser(): a nullopt atomic_peek
+        // (with name_suffix empty and have_call_id false) falls through to the final `else`
+        // branch there, leaving matched_atomic == false, so the *entire* func_parser
+        // (open + args + close) gets wrapped in p.atomic() — a broader atomic-wrap than the
+        // narrower one an atomic_peek-populated branch would produce. This is a behavior
+        // change for essentially every real-world tool call that has at least one required
+        // parameter (the common case), not just the all-optional edge case #20650 targeted.
+        // This needs explicit tool-calling regression testing with the actual served models
+        // (e.g. Qwen3.6 on llm3) before being trusted in production.
         auto atomic_peek = (!arguments.name_prefix.empty() && !required_parsers.empty()) ?
             std::optional(p.peek(p.literal(arguments.name_prefix))) : std::nullopt;
         auto func_parser = build_func_parser(p, name, call_id_section, have_call_id, args_seq, atomic_peek);
