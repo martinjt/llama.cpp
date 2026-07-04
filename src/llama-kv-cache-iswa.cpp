@@ -272,6 +272,20 @@ void llama_kv_cache_iswa::state_read(llama_io_read_i & io, llama_seq_id seq_id, 
     kv_swa->state_read(io, seq_id, flags);
 }
 
+size_t llama_kv_cache_iswa::state_write_range(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    // mirror the base+SWA ordering of state_write: base first, then SWA, into the same io stream
+    kv_base->state_write_range(io, seq_id, p0, p1);
+
+    return kv_swa->state_write_range(io, seq_id, p0, p1);
+}
+
+size_t llama_kv_cache_iswa::state_read_range(llama_io_read_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // read back in the same order they were written
+    kv_base->state_read_range(io, seq_id, p0, p1);
+
+    return kv_swa->state_read_range(io, seq_id, p0, p1);
+}
+
 llama_kv_cache * llama_kv_cache_iswa::get_base() const {
     return kv_base.get();
 }

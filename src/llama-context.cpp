@@ -2986,6 +2986,63 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
     }
 }
 
+size_t llama_context::state_seq_get_size_range(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    llama_io_write_dummy io(false);
+    try {
+        io.write(&io_magic, sizeof(io_magic));
+        io.write(&seq_id,   sizeof(seq_id));
+
+        if (memory) {
+            memory->state_write_range(io, seq_id, p0, p1);
+        }
+
+        return io.n_bytes();
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: error getting range state size: %s\n", __func__, err.what());
+        return 0;
+    }
+}
+
+size_t llama_context::state_seq_get_data_range(llama_seq_id seq_id, uint8_t * dst, size_t size, llama_pos p0, llama_pos p1) {
+    llama_io_write_host io(dst, size);
+    try {
+        io.write(&io_magic, sizeof(io_magic));
+        io.write(&seq_id,   sizeof(seq_id));
+
+        if (memory) {
+            memory->state_write_range(io, seq_id, p0, p1);
+        }
+
+        return io.n_bytes();
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: error saving range state: %s\n", __func__, err.what());
+        return 0;
+    }
+}
+
+size_t llama_context::state_seq_set_data_range(llama_seq_id seq_id, const uint8_t * src, size_t size, llama_pos p0, llama_pos p1) {
+    llama_io_read_host io(src, size);
+    try {
+        uint32_t magic_read;
+        io.read(&magic_read, sizeof(magic_read));
+        if (io_magic != magic_read) {
+            throw std::runtime_error("wrong sequence state magic");
+        }
+
+        llama_seq_id seq_id_read;
+        io.read(&seq_id_read, sizeof(seq_id_read));
+
+        if (memory) {
+            memory->state_read_range(io, seq_id, p0, p1);
+        }
+
+        return io.n_bytes();
+    } catch (const std::exception & err) {
+        LLAMA_LOG_ERROR("%s: error loading range state: %s\n", __func__, err.what());
+        return 0;
+    }
+}
+
 bool llama_context::state_load_file(const char * filepath, llama_token * tokens_out, size_t n_token_capacity, size_t * n_token_count_out) {
     llama_file file(filepath, "rb");
 
@@ -4018,6 +4075,24 @@ size_t llama_state_seq_set_data_ext(llama_context * ctx, const uint8_t * src, si
     ctx->synchronize();
 
     return ctx->state_seq_set_data(seq_id, src, size, flags);
+}
+
+size_t llama_state_seq_get_size_range(llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    ctx->synchronize();
+
+    return ctx->state_seq_get_size_range(seq_id, p0, p1);
+}
+
+size_t llama_state_seq_get_data_range(llama_context * ctx, uint8_t * dst, size_t size, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    ctx->synchronize();
+
+    return ctx->state_seq_get_data_range(seq_id, dst, size, p0, p1);
+}
+
+size_t llama_state_seq_set_data_range(llama_context * ctx, const uint8_t * src, size_t size, llama_seq_id dest_seq_id, llama_pos p0, llama_pos p1) {
+    ctx->synchronize();
+
+    return ctx->state_seq_set_data_range(dest_seq_id, src, size, p0, p1);
 }
 
 size_t llama_state_seq_save_file(llama_context * ctx, const char * filepath, llama_seq_id seq_id, const llama_token * tokens, size_t n_token_count) {

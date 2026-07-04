@@ -124,6 +124,13 @@ struct llama_memory_i {
 
     virtual void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const = 0;
     virtual void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) = 0;
+
+    // position-range-scoped variants: save/load only the cells whose position lies in [p0, p1)
+    // (p0 < 0 means "from the start", p1 < 0 means "to the end", mirroring seq_rm/seq_add).
+    // the default implementation only supports the whole-sequence case and asserts otherwise -
+    // memory types that can genuinely scope by position range (e.g. llama_kv_cache) override these.
+    virtual size_t state_write_range(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+    virtual size_t state_read_range (llama_io_read_i  & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 };
 
 using llama_memory_ptr = std::unique_ptr<llama_memory_i>;

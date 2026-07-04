@@ -1970,13 +1970,20 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
     return gf;
 }
 
-void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+size_t llama_kv_cache::state_write_impl(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
-        return;
+        return io.n_bytes();
     }
 
-    GGML_UNUSED(flags);
+    // normalize the position range the same way seq_rm/seq_add do:
+    // p0 < 0 -> from the start, p1 < 0 -> to the end (whole sequence)
+    if (p0 < 0) {
+        p0 = 0;
+    }
+    if (p1 < 0) {
+        p1 = std::numeric_limits<llama_pos>::max();
+    }
 
     io.write(&n_stream, sizeof(n_stream));
 
@@ -2003,6 +2010,10 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
 
                 add_cell = !is_masked;
             }
+
+            // check the cell's position lies within the requested range [p0, p1)
+            // (for the whole-sequence case p0=0, p1=max, so this is always true)
+            add_cell = add_cell && cells.pos_in(i, p0, p1);
 
             if (add_cell) {
                 ++cell_count;
@@ -2038,15 +2049,25 @@ void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, lla
         state_write_meta(io, cr, seq_id);
         state_write_data(io, cr);
     }
+
+    return io.n_bytes();
 }
 
-void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+    GGML_UNUSED(flags);
+    state_write_impl(io, seq_id, /*p0=*/-1, /*p1=*/-1);
+}
+
+size_t llama_kv_cache::state_write_range(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    GGML_ASSERT(seq_id != -1 && "range-scoped save requires a specific seq_id");
+    return state_write_impl(io, seq_id, p0, p1);
+}
+
+size_t llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
-        return;
+        return io.n_bytes();
     }
-
-    GGML_UNUSED(flags);
 
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
@@ -2081,6 +2102,22 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
             throw std::runtime_error("failed to restore kv cache");
         }
     }
+
+    return io.n_bytes();
+}
+
+void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    GGML_UNUSED(flags);
+    state_read_impl(io, seq_id);
+}
+
+size_t llama_kv_cache::state_read_range(llama_io_read_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // the read side needs no position filtering: each saved cell carries its own pos, and the
+    // buffer produced by state_write_range already contains only the cells within [p0, p1).
+    GGML_UNUSED(p0);
+    GGML_UNUSED(p1);
+    GGML_ASSERT(seq_id != -1 && "range-scoped load requires a specific seq_id");
+    return state_read_impl(io, seq_id);
 }
 
 void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id) const {

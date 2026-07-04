@@ -149,6 +149,9 @@ public:
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
 
+    size_t state_write_range(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const override;
+    size_t state_read_range (llama_io_read_i  & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1)       override;
+
     //
     // llama_kv_cache specific API
     //
@@ -312,6 +315,11 @@ private:
 
         std::vector<std::pair<uint32_t, uint32_t>> data; // ranges, from inclusive, to exclusive
     };
+
+    // shared by state_write (whole-sequence) and state_write_range (position-scoped);
+    // p0 < 0 / p1 < 0 are normalized to "from start" / "to end"
+    size_t state_write_impl(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+    size_t state_read_impl (llama_io_read_i  & io, llama_seq_id seq_id);
 
     void state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
