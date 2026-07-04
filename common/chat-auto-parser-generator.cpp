@@ -334,22 +334,22 @@ common_peg_parser analyze_tools::build_tool_parser_tag_json(parser_build_context
     if (!format.per_call_start.empty()) {
         auto wrapped_call = format.per_call_start + tool_choice + format.per_call_end;
         if (inputs.parallel_tool_calls) {
-            tool_calls = p.trigger_rule("tool-call", wrapped_call + p.zero_or_more(p.space() + wrapped_call));
+            tool_calls = p.trigger_rule("tool-call", wrapped_call + p.zero_or_more(p.space() + wrapped_call) + p.space());
         } else {
-            tool_calls = p.trigger_rule("tool-call", wrapped_call);
+            tool_calls = p.trigger_rule("tool-call", wrapped_call + p.space());
         }
         if (!format.section_start.empty()) {
             tool_calls = p.trigger_rule("tool-calls",
                                         p.literal(format.section_start) + p.space() + tool_calls + p.space() +
-                                            (format.section_end.empty() ? p.end() : p.literal(format.section_end)));
+                                            (format.section_end.empty() ? p.end() : p.literal(format.section_end) + p.space()));
         }
     } else {
         std::string separator = ", ";  // Default
         if (inputs.parallel_tool_calls) {
             tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice +
-                                                         p.zero_or_more(separator + tool_choice) + format.section_end);
+                                                         p.zero_or_more(separator + tool_choice) + format.section_end + p.space());
         } else {
-            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice + format.section_end);
+            tool_calls = p.trigger_rule("tool-call", format.section_start + tool_choice + format.section_end + p.space());
         }
     }
 
@@ -402,23 +402,16 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
                                     p.tool_arg_close(p.literal(arguments.value_suffix)))));
 
             auto named_arg = p.rule("tool-" + name + "-arg-" + param_name, arg);
-            if (is_required) {
-                required_parsers.push_back(named_arg);
-            } else {
-                optional_parsers.push_back(named_arg);
-            }
+            // All params use flexible ordering. <parameter= is multi-token so the
+            // grammar cannot enforce param ordering during generation; enforcing it
+            // in the post-generation parser causes failures when the model reorders
+            // required params (e.g. newString before oldString in edit calls).
+            optional_parsers.push_back(named_arg);
+            (void) is_required;
         }
 
-        // Build required arg sequence in definition order
+        // All args use flexible ordering regardless of required status
         common_peg_parser args_seq = p.eps();
-        for (size_t i = 0; i < required_parsers.size(); i++) {
-            if (i > 0) {
-                args_seq = args_seq + p.space();
-            }
-            args_seq = args_seq + required_parsers[i];
-        }
-
-        // Build optional args with flexible ordering
         if (!optional_parsers.empty()) {
             common_peg_parser any_opt = p.choice();
             for (const auto & opt : optional_parsers) {
