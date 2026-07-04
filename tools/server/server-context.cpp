@@ -5333,7 +5333,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
     }
 
     bool use_base64 = false;
-    if (body.count("encoding_format") != 0) {
+    if (body.count("encoding_format") != 0 && !body.at("encoding_format").is_null()) {
         const std::string & format = body.at("encoding_format");
         if (format == "base64") {
             use_base64 = true;
