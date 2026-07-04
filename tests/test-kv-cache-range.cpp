@@ -42,10 +42,17 @@ int main(int argc, char ** argv) {
             : (i % (n_vocab - 1)) + 1; // deterministic filler tokens
     }
 
-    auto fill_batch = [&](llama_batch & b, int lo, int hi, llama_seq_id seq) {
+    // A second, deliberately *different* token stream covering positions [0, 32), used to poison
+    // seq 1's cells before the restore runs (see the restore path below for why).
+    std::vector<llama_token> wrong_tokens(32);
+    for (int i = 0; i < 32; ++i) {
+        wrong_tokens[i] = (tokens[i] + n_vocab / 2) % n_vocab;
+    }
+
+    auto fill_batch = [&](llama_batch & b, const std::vector<llama_token> & src, int lo, int hi, llama_seq_id seq) {
         int n = 0;
         for (int i = lo; i < hi; ++i) {
-            b.token[n]     = tokens[i];
+            b.token[n]     = src[i];
             b.pos[n]       = i;
             b.n_seq_id[n]  = 1;
             b.seq_id[n][0] = seq;
@@ -57,11 +64,11 @@ int main(int argc, char ** argv) {
 
     // Reference path (sequence 0), chunked 32+32: decode [0,32), then [32,64).
     llama_batch ref_head = llama_batch_init(32, 0, 1);
-    fill_batch(ref_head, 0, 32, 0);
+    fill_batch(ref_head, tokens, 0, 32, 0);
     if (llama_decode(ctx, ref_head) != 0) { fprintf(stderr, "ref_head decode failed\n"); return 1; }
 
     llama_batch ref_tail = llama_batch_init(32, 0, 1);
-    fill_batch(ref_tail, 32, 64, 0);
+    fill_batch(ref_tail, tokens, 32, 64, 0);
     if (llama_decode(ctx, ref_tail) != 0) { fprintf(stderr, "ref_tail decode failed\n"); return 1; }
 
     const float * logits_ref = llama_get_logits_ith(ctx, -1);
@@ -78,11 +85,22 @@ int main(int argc, char ** argv) {
     // Clear sequence 0 so the restore below reuses freed cells.
     llama_memory_seq_rm(llama_get_memory(ctx), 0, -1, -1);
 
-    // Restore path (sequence 1): first decode [0,32) normally to establish cells, then overwrite
-    // that range with the saved chunk (proves set_data_range replaces state, not just appends),
-    // then decode the uncached tail [32,64) on top of the restored range.
+    // Restore path (sequence 1): first decode *different* filler tokens into positions [0,32) to
+    // allocate those cells with K/V content that is deliberately wrong, then call
+    // llama_state_seq_set_data_range to overwrite that range with the saved chunk, then decode the
+    // uncached tail [32,64) on top of the restored range.
+    //
+    // Why decode wrong content first instead of the real head tokens: if we pre-decoded the *same*
+    // tokens at the *same* positions that produced the saved chunk, seq 1's cells would already be
+    // bit-identical to the saved K/V before the restore call even runs (K/V for a given
+    // token+position is deterministic and independent of seq_id/batch composition). A restore that
+    // silently no-ops -- reads and discards the buffer without writing anything -- would then still
+    // leave the correct content in place and the test would pass despite the bug. Poisoning the
+    // cells with different tokens first means the correct final state can only be reached if the
+    // restore genuinely overwrites; a no-op or partial restore leaves the wrong K/V behind, which
+    // changes the tail's attention output and fails the logit comparison below.
     llama_batch head = llama_batch_init(32, 0, 1);
-    fill_batch(head, 0, 32, 1);
+    fill_batch(head, wrong_tokens, 0, 32, 1);
     for (int i = 0; i < 32; ++i) {
         head.logits[i] = false;
     }
@@ -92,7 +110,7 @@ int main(int argc, char ** argv) {
     if (nread != range_size) { fprintf(stderr, "nread %zu != range_size %zu\n", nread, range_size); return 1; }
 
     llama_batch tail = llama_batch_init(32, 0, 1);
-    fill_batch(tail, 32, 64, 1);
+    fill_batch(tail, tokens, 32, 64, 1);
     if (llama_decode(ctx, tail) != 0) { fprintf(stderr, "tail decode failed\n"); return 1; }
 
     const float * logits_spliced = llama_get_logits_ith(ctx, -1);
