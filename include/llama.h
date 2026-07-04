@@ -911,6 +911,39 @@ extern "C" {
                     llama_seq_id   dest_seq_id,
            llama_state_seq_flags   flags);
 
+    // Range-scoped variants: operate on only the cells of the sequence whose position lies in
+    // [p0, p1). Follows the same p0/p1 convention as llama_memory_seq_rm/seq_add:
+    //   p0 < 0 : treat as 0
+    //   p1 < 0 : treat as infinity (no upper bound)
+    // Used for content-addressed chunk caching, where a fixed-size token chunk maps to a fixed
+    // position range and can be saved/restored independently of the rest of the sequence.
+
+    LLAMA_API size_t llama_state_seq_get_size_range(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+                       llama_pos   p0,
+                       llama_pos   p1);
+
+    LLAMA_API size_t llama_state_seq_get_data_range(
+            struct llama_context * ctx,
+                         uint8_t * dst,
+                          size_t   size,
+                    llama_seq_id   seq_id,
+                       llama_pos   p0,
+                       llama_pos   p1);
+
+    // Copy previously-saved range data (from llama_state_seq_get_data_range) into dest_seq_id.
+    // The destination sequence must already have cells allocated covering [p0, p1) before this
+    // call (e.g. via a batch that established positions, or via llama_memory_seq_cp) — this
+    // function fills in the K/V content for that range, it does not allocate cells.
+    LLAMA_API size_t llama_state_seq_set_data_range(
+            struct llama_context * ctx,
+                   const uint8_t * src,
+                          size_t   size,
+                    llama_seq_id   dest_seq_id,
+                       llama_pos   p0,
+                       llama_pos   p1);
+
     //
     // Decoding
     //
