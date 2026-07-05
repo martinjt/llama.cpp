@@ -43,7 +43,9 @@ struct aligned_buffer {
 class disk_chunk_cache_backend : public chunk_cache_backend {
 public:
     disk_chunk_cache_backend(std::string dir, size_t limit_mib)
-        : dir(std::move(dir)), limit_bytes(limit_mib * 1024ull * 1024ull) {}
+        : dir(std::move(dir)), limit_bytes(limit_mib * 1024ull * 1024ull) {
+        sweep_stale_tmp_files();
+    }
 
     bool get(const chunk_key & key, std::vector<uint8_t> & data) override {
         const std::string path = dir + "/" + key_to_filename(key);
@@ -145,6 +147,31 @@ public:
     }
 
 private:
+    // A .tmp file only exists transiently during an in-flight put() (see put() above: written
+    // via open()/write(), then atomically rename()'d into place). If one is found on disk at
+    // construction time, no put() from *this* backend instance can possibly be in flight yet --
+    // construction always happens before the first get()/put() call is reachable -- so any
+    // .tmp file here must be an orphan left behind by a previous process that crashed, was
+    // OOM-killed, or hit disk-full mid-write. It was never successfully rename()'d, so it was
+    // never a valid/retrievable cache entry, and no code path depends on it still existing.
+    // Left alone, it would be permanently excluded from evict_if_over_quota()'s directory scan
+    // (which explicitly skips .tmp files so they aren't miscounted or evicted mid-write) --
+    // silently leaking disk space forever, exactly the unbounded-growth failure mode this
+    // backend exists to close. Sweep it away unconditionally.
+    void sweep_stale_tmp_files() {
+        DIR * d = opendir(dir.c_str());
+        if (!d) return;
+        struct dirent * de;
+        while ((de = readdir(d)) != nullptr) {
+            const std::string name = de->d_name;
+            if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0) {
+                const std::string path = dir + "/" + name;
+                unlink(path.c_str());
+            }
+        }
+        closedir(d);
+    }
+
     // mtime is used as the recency signal (rather than an in-memory LRU list, cf. the ram
     // backend) because the disk backend's whole purpose is surviving restarts: touched on
     // both get() hits and put() writes, then eviction scans the directory and sorts by mtime.

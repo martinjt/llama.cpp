@@ -128,5 +128,58 @@ int main() {
         printf("OK: disk chunk cache backend evicts least-recently-touched entry under quota, not FIFO\n");
     }
 
+    // Stale .tmp sweep: a .tmp file left behind by a crashed/killed previous process (i.e.
+    // never rename()'d into place) must be deleted when a new backend instance is constructed
+    // against that directory (simulating a server restart), and the backend must still work
+    // normally afterward.
+    {
+        const std::string dir3 = "/tmp/chunk_cache_disk_tmp_sweep_test";
+        std::filesystem::remove_all(dir3);
+        std::filesystem::create_directories(dir3);
+
+        const std::string orphan_path = dir3 + "/orphaned-key.bin.tmp";
+        {
+            FILE * f = fopen(orphan_path.c_str(), "wb");
+            if (!f) {
+                fprintf(stderr, "FAIL: could not create orphaned .tmp file for test setup\n");
+                return 1;
+            }
+            std::vector<uint8_t> dummy(8192, 0x55);
+            fwrite(dummy.data(), 1, dummy.size(), f);
+            fclose(f);
+        }
+
+        if (!std::filesystem::exists(orphan_path)) {
+            fprintf(stderr, "FAIL: orphaned .tmp file was not created (test setup broken)\n");
+            return 1;
+        }
+
+        // Construct a fresh backend instance pointed at the directory, simulating server
+        // restart after the crash that left the .tmp file behind.
+        auto sweep_backend = make_disk_chunk_cache_backend(dir3, /*limit_mib=*/100);
+
+        if (std::filesystem::exists(orphan_path)) {
+            fprintf(stderr, "FAIL: orphaned .tmp file still present after backend construction (expected sweep to delete it)\n");
+            return 1;
+        }
+
+        // Confirm the backend still works normally after the sweep.
+        chunk_key ks{ "fp1", 444 };
+        std::vector<uint8_t> sweep_data_in(2048, 0x99);
+        sweep_backend->put(ks, sweep_data_in);
+        std::vector<uint8_t> sweep_data_out;
+        if (!sweep_backend->get(ks, sweep_data_out)) {
+            fprintf(stderr, "FAIL: backend->get(ks, ...) missed right after put following the .tmp sweep (expected a hit)\n");
+            return 1;
+        }
+        if (sweep_data_out != sweep_data_in) {
+            fprintf(stderr, "FAIL: sweep_data_out != sweep_data_in (expected normal put()/get() round-trip after the sweep)\n");
+            return 1;
+        }
+
+        std::filesystem::remove_all(dir3);
+        printf("OK: disk chunk cache backend sweeps orphaned .tmp files on construction\n");
+    }
+
     return 0;
 }
