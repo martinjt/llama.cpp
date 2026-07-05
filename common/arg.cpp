@@ -1472,6 +1472,33 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--chunk-cache-backend"}, "BACKEND",
+        "content-addressed chunk cache backend: ram, disk, or lmcache (default: disabled)",
+        [](common_params & params, const std::string & value) {
+            if (value != "ram" && value != "disk" && value != "lmcache") {
+                throw std::invalid_argument("--chunk-cache-backend must be ram, disk, or lmcache");
+            }
+            params.chunk_cache_backend = value;
+        }
+    ).set_env("LLAMA_ARG_CHUNK_CACHE_BACKEND").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--chunk-cache-path"}, "PATH",
+        "chunk cache backend target: a directory for disk, or host:port for lmcache",
+        [](common_params & params, const std::string & value) {
+            params.chunk_cache_path = value;
+        }
+    ).set_env("LLAMA_ARG_CHUNK_CACHE_PATH").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--chunk-cache-snapshot-step"}, "N",
+        string_format("token interval between full-state snapshots for the content-addressed cache (default: %d)", params.chunk_cache_snapshot_step),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("--chunk-cache-snapshot-step must be positive");
+            }
+            params.chunk_cache_snapshot_step = value;
+        }
+    ).set_env("LLAMA_ARG_CHUNK_CACHE_SNAPSHOT_STEP").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
         "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",

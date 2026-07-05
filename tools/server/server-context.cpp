@@ -1,5 +1,6 @@
 #include "server-context.h"
 #include "server-chat.h"
+#include "server-chunk-cache.h"
 #include "server-common.h"
 #include "server-http.h"
 #include "server-task.h"
@@ -923,6 +924,9 @@ private:
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
+    // nullptr if disabled (chunk_cache_backend == "")
+    std::unique_ptr<chunk_cache_backend> chunk_cache;
+
     server_metrics metrics;
 
     json json_ui_settings = json::object();
@@ -1412,6 +1416,20 @@ private:
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
         }
         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
+
+        if (params_base.chunk_cache_backend == "ram") {
+            SRV_TRC("chunk cache backend: ram, size limit: %d MiB\n", params_base.chunk_cache_ram_mib);
+            chunk_cache = make_ram_chunk_cache_backend(params_base.chunk_cache_ram_mib);
+        } else if (params_base.chunk_cache_backend == "disk") {
+            SRV_TRC("chunk cache backend: disk, path: %s\n", params_base.chunk_cache_path.c_str());
+            chunk_cache = make_disk_chunk_cache_backend(params_base.chunk_cache_path);
+        } else if (params_base.chunk_cache_backend == "lmcache") {
+            const size_t colon = params_base.chunk_cache_path.find(':');
+            const std::string host = params_base.chunk_cache_path.substr(0, colon);
+            const int port = std::stoi(params_base.chunk_cache_path.substr(colon + 1));
+            SRV_TRC("chunk cache backend: lmcache, target: %s:%d\n", host.c_str(), port);
+            chunk_cache = make_lmcache_chunk_cache_backend(host, port);
+        }
 
         if (params_base.n_ctx_checkpoints > 0) {
             SRV_TRC("context checkpoints enabled, max = %d, min spacing = %d\n",
