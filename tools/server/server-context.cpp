@@ -1758,7 +1758,7 @@ private:
         // excluded for multimodal prompts: get_text_tokens() strips image chunks, so a hash
         // match here would not guarantee the images match too, and keep_first(n) can also land
         // mid-chunk and assert. see the !has_mtmd guard on n_cache_reuse for precedent.
-        if (ret && chunk_cache && task.type == SERVER_TASK_TYPE_COMPLETION && !task.tokens.has_mtmd) {
+        if (ret && chunk_cache && task.type == SERVER_TASK_TYPE_COMPLETION && !task.tokens.has_mtmd && !task.params.opt_out_chunk_cache) {
             const llama_tokens & req_tokens = task.tokens.get_text_tokens();
             const size_t cur_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
 
@@ -4425,6 +4425,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.res_type          = res_type;
             task.params.oaicompat_cmpl_id = completion_id;
             task.params.oaicompat_model   = meta->model_name;
+
+            // parse per-request opt-out header for chunk-cache
+            {
+                auto it = req.headers.find("x-chunk-cache");
+                task.params.opt_out_chunk_cache = (it != req.headers.end() && it->second == "off");
+            }
 
             // prepare child tasks
             if (task.params.n_cmpl > 1) {

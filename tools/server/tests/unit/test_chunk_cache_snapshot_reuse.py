@@ -161,3 +161,39 @@ def test_chunk_cache_snapshot_restore_is_bit_correct():
         )
     finally:
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_chunk_cache_opt_out_header():
+    """The x-chunk-cache: off header must bypass the chunk-cache lookup entirely,
+    forcing a cold recompute even when a cached snapshot exists."""
+    global server
+    cache_dir = tempfile.mkdtemp(prefix="cc-opt-out-")
+    try:
+        server.chunk_cache_backend = "disk"
+        server.chunk_cache_path = cache_dir
+        server.chunk_cache_snapshot_step = 64
+        server.start()
+
+        prompt = "The quick brown fox " * 200
+
+        # First request: warm up the cache
+        res1 = server.make_request("POST", "/completion", data={
+            "prompt": prompt, "n_predict": 1
+        })
+        assert res1.status_code == 200
+
+        # Second request: same prompt but with opt-out header
+        # Should NOT reuse cache, so cache_n should be 0
+        res2 = server.make_request(
+            "POST", "/completion",
+            data={"prompt": prompt, "n_predict": 1},
+            headers={"x-chunk-cache": "off"},
+        )
+        assert res2.status_code == 200
+        cache_n = res2.body.get("timings", {}).get("cache_n", 0)
+        assert cache_n == 0, (
+            f"expected opt-out header to bypass cache (cache_n=0), "
+            f"but got cache_n={cache_n}"
+        )
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
