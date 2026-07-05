@@ -319,12 +319,21 @@ private:
     // shared by state_write (whole-sequence) and state_write_range (position-scoped);
     // p0 < 0 / p1 < 0 are normalized to "from start" / "to end"
     size_t state_write_impl(llama_io_write_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
-    size_t state_read_impl (llama_io_read_i  & io, llama_seq_id seq_id);
+
+    // shared by state_read (whole-sequence, p0=-1/p1=-1) and state_read_range (position-scoped).
+    // for a single-sequence restore (dest_seq_id != -1), p0/p1 bound how much of dest_seq_id's
+    // existing content gets cleared before the new cells are established: state_read (whole
+    // restore) must still wipe the entire prior sequence (p0=-1/p1=-1 normalizes to that), but
+    // state_read_range must only clear [p0, p1) so that a chain of range restores into the same
+    // seq_id at increasing, non-overlapping ranges is additive -- an earlier restored chunk must
+    // survive a later one. See llama_state_seq_set_data_range's doc comment in include/llama.h.
+    size_t state_read_impl (llama_io_read_i  & io, llama_seq_id seq_id, llama_pos p0 = -1, llama_pos p1 = -1);
 
     void state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id = -1) const;
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
 
-    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1);
+    // p0/p1: see state_read_impl's comment -- bounds the seq_rm scope for dest_seq_id != -1.
+    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1, llama_pos p0 = -1, llama_pos p1 = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
 };
 

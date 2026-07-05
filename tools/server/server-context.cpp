@@ -1768,6 +1768,21 @@ private:
                 // chunk's hash folds in its parent's), so the first miss ends reuse -- there is
                 // no "skip a gap" option. finer-grained than the primary path: exact per
                 // CHUNK_CACHE_RANGE_CHUNK_SIZE tokens rather than per chunk_cache_snapshot_step.
+                //
+                // No prior decode / llama_memory_seq_cp is needed before calling
+                // llama_state_seq_set_data_range below, including for a genuinely fresh slot with
+                // no decode history (e.g. right after a server restart): confirmed by reading
+                // llama_kv_cache::state_read_meta (src/llama-kv-cache.cpp), which builds a ubatch
+                // from the positions stored *in the saved blob itself* and establishes cells for
+                // it via find_slot()+apply_ubatch() -- it does not require dest_seq_id to already
+                // have cells there. It does, however, unconditionally clear dest_seq_id's cells
+                // first; that clear used to span the *whole* sequence regardless of [p0, p1),
+                // which silently destroyed every previously-restored chunk each time the next one
+                // in this loop was applied (only the last chunk in the chain would have actually
+                // survived). Fixed in llama-kv-cache.cpp/.h to scope that clear to [p0, p1), so
+                // this loop's repeated calls into the same ret->id are now additive. See
+                // include/llama.h's llama_state_seq_set_data_range doc comment (updated -- it
+                // previously claimed the opposite, that cells had to pre-exist).
                 const auto chain = compute_chunk_chain(req_tokens, weights_fingerprint, CHUNK_CACHE_RANGE_CHUNK_SIZE);
 
                 size_t n_restored = 0;
@@ -1782,6 +1797,22 @@ private:
 
                     const llama_pos p0 = (llama_pos) (c.chunk_index * CHUNK_CACHE_RANGE_CHUNK_SIZE);
                     const llama_pos p1 = (llama_pos) (p0 + c.n_tokens);
+
+                    // mirror the primary snapshot path's guard (below: `n > cur_prefix`): don't
+                    // bother restoring a chunk that can't improve on what the slot already holds.
+                    // this chunk range lies entirely within the already-resident common prefix,
+                    // so its cells are presumed already correct (same slot, same content) -- keep
+                    // walking the chain (still needed to find the first real miss / extend past
+                    // cur_prefix) without touching the KV cache for it. Also matters now that
+                    // llama_state_seq_set_data_range establishes/clears exactly [p0, p1) per call
+                    // (see include/llama.h's doc comment and llama-kv-cache.cpp's
+                    // state_read_meta): restoring an already-resident chunk here would be safe
+                    // (it wouldn't clobber other ranges) but is still wasted work with no benefit.
+                    if (p1 <= (llama_pos) cur_prefix) {
+                        n_restored = (size_t) p1;
+                        continue;
+                    }
+
                     const size_t got = llama_state_seq_set_data_range(ctx_tgt, blob.data(), blob.size(), ret->id, p0, p1);
                     if (got != blob.size()) {
                         SLT_WRN(*ret, "range chunk cache: restore failed at [%d,%d) (restored %zu of %zu bytes), forcing recompute\n",

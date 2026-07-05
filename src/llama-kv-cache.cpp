@@ -2063,7 +2063,7 @@ size_t llama_kv_cache::state_write_range(llama_io_write_i & io, llama_seq_id seq
     return state_write_impl(io, seq_id, p0, p1);
 }
 
-size_t llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id) {
+size_t llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
         return io.n_bytes();
@@ -2090,14 +2090,18 @@ size_t llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id
         slot_info sinfo;
 
         bool res = true;
-        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id);
+        res = res && state_read_meta(io, strm, cell_count, sinfo, seq_id, p0, p1);
         res = res && state_read_data(io, strm, cell_count, sinfo);
 
         if (!res) {
             if (seq_id == -1) {
                 clear(true);
             } else {
-                seq_rm(seq_id, -1, -1);
+                // match whatever scope state_read_meta cleared before failing: a bounded range
+                // restore (state_read_range) only ever clears [p0, p1), so the failure cleanup
+                // must be scoped the same way, or it would destroy unrelated, still-valid content
+                // (e.g. an earlier, already-restored chunk in the same sequence).
+                seq_rm(seq_id, p0, p1);
             }
             throw std::runtime_error("failed to restore kv cache");
         }
@@ -2108,16 +2112,22 @@ size_t llama_kv_cache::state_read_impl(llama_io_read_i & io, llama_seq_id seq_id
 
 void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     GGML_UNUSED(flags);
-    state_read_impl(io, seq_id);
+    // whole-sequence restore: p0=-1/p1=-1 normalizes to "clear everything", matching the
+    // pre-existing behavior (this call replaces the entire destination sequence).
+    state_read_impl(io, seq_id, /*p0=*/-1, /*p1=*/-1);
 }
 
 size_t llama_kv_cache::state_read_range(llama_io_read_i & io, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
-    // the read side needs no position filtering: each saved cell carries its own pos, and the
-    // buffer produced by state_write_range already contains only the cells within [p0, p1).
-    GGML_UNUSED(p0);
-    GGML_UNUSED(p1);
+    // the read side needs no position filtering when deciding *which cells to parse*: each saved
+    // cell carries its own pos, and the buffer produced by state_write_range already contains
+    // only the cells within [p0, p1). p0/p1 are still threaded through to state_read_meta though:
+    // for a single-sequence restore, state_read_meta clears dest_seq_id's existing cells before
+    // establishing the new ones, and that clear must be scoped to [p0, p1) -- not the whole
+    // sequence -- so that restoring one chunk range doesn't destroy a different, already-restored
+    // chunk range of the same seq_id (see the doc comment on llama_state_seq_set_data_range in
+    // include/llama.h and state_read_impl's comment in llama-kv-cache.h).
     GGML_ASSERT(seq_id != -1 && "range-scoped load requires a specific seq_id");
-    return state_read_impl(io, seq_id);
+    return state_read_impl(io, seq_id, p0, p1);
 }
 
 void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t & cr, llama_seq_id seq_id) const {
@@ -2252,13 +2262,25 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
     }
 }
 
-bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id) {
+bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, slot_info & sinfo, llama_seq_id dest_seq_id, llama_pos p0, llama_pos p1) {
     auto & cells = v_cells[strm];
     auto & head  = v_heads[strm];
 
     if (dest_seq_id != -1) {
         // single sequence
-        seq_rm(dest_seq_id, -1, -1);
+        //
+        // Clear dest_seq_id's existing cells before establishing the newly-read ones -- but only
+        // within [p0, p1), not the whole sequence. For a whole-sequence restore (state_read /
+        // llama_state_seq_set_data[_ext]), p0/p1 default to -1/-1, which normalizes to "the whole
+        // sequence" in seq_rm, so behavior there is unchanged from before this was parameterized.
+        // For a range-scoped restore (state_read_range / llama_state_seq_set_data_range), p0/p1
+        // are the caller's actual bounds: clearing only that sub-range means restoring one chunk
+        // does not destroy a different, already-restored chunk range of the same seq_id -- which
+        // an unconditional seq_rm(dest_seq_id, -1, -1) here would do, silently discarding every
+        // previously-restored chunk each time a new one was applied. find_slot() below only ever
+        // picks cells that are empty, so it cannot collide with cells this seq_id already holds
+        // at other (still-valid, untouched) positions.
+        seq_rm(dest_seq_id, p0, p1);
 
         llama_batch_allocr balloc(hparams.n_pos_per_embd());
 

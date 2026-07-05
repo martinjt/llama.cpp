@@ -933,9 +933,18 @@ extern "C" {
                        llama_pos   p1);
 
     // Copy previously-saved range data (from llama_state_seq_get_data_range) into dest_seq_id.
-    // The destination sequence must already have cells allocated covering [p0, p1) before this
-    // call (e.g. via a batch that established positions, or via llama_memory_seq_cp) — this
-    // function fills in the K/V content for that range, it does not allocate cells.
+    // This function allocates cells for [p0, p1) itself -- dest_seq_id does NOT need to already
+    // have cells there; a completely untouched (never-decoded) sequence is fine. Internally it
+    // clears dest_seq_id's existing cells within [p0, p1) (only that sub-range, nothing outside
+    // it) before writing the restored positions/seq-ids/K-V content, so calling this repeatedly
+    // for a chain of increasing, non-overlapping ranges of the same dest_seq_id is additive: an
+    // earlier restored range is left intact by a later one. (Verified by reading
+    // llama_kv_cache::state_read_meta/state_read_impl -- an earlier revision of this comment
+    // claimed the opposite, that cells had to pre-exist; that was never accurate for this
+    // implementation and has been corrected.)
+    //
+    // See tools/server/server-context.cpp's range-chunk cache restore loop for the intended usage
+    // pattern of chaining multiple calls into one sequence.
     LLAMA_API size_t llama_state_seq_set_data_range(
             struct llama_context * ctx,
                    const uint8_t * src,
