@@ -1745,7 +1745,10 @@ private:
         // slot, and restore that full-state snapshot into the slot's sequence. this is a
         // separate mechanism from the in-memory server_prompt_cache LCP restore above and from
         // the per-slot PARTIAL_ONLY context checkpoints in update_slots().
-        if (ret && chunk_cache && task.type == SERVER_TASK_TYPE_COMPLETION) {
+        // excluded for multimodal prompts: get_text_tokens() strips image chunks, so a hash
+        // match here would not guarantee the images match too, and keep_first(n) can also land
+        // mid-chunk and assert. see the !has_mtmd guard on n_cache_reuse for precedent.
+        if (ret && chunk_cache && task.type == SERVER_TASK_TYPE_COMPLETION && !task.tokens.has_mtmd) {
             const llama_tokens & req_tokens = task.tokens.get_text_tokens();
             const size_t step = (size_t) params_base.chunk_cache_snapshot_step;
             const size_t cur_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
@@ -3183,9 +3186,13 @@ private:
                     // request, and not GENERATING, whose last sampled token is not yet decoded
                     // into the KV cache) so that the captured state exactly matches the key. this
                     // is a separate mechanism from the PARTIAL_ONLY context checkpoints below.
+                    // excluded for multimodal prompts: get_text_tokens() strips image chunks, so
+                    // the content hash would collide across requests with the same text but
+                    // different images (see !has_mtmd guard on n_cache_reuse above for precedent).
                     if (chunk_cache &&
                         slot.state == SLOT_STATE_PROCESSING_PROMPT &&
-                        slot.task->type == SERVER_TASK_TYPE_COMPLETION) {
+                        slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
+                        !slot.prompt.tokens.has_mtmd) {
                         const int64_t n_now = slot.prompt.n_tokens();
                         const int64_t step  = params_base.chunk_cache_snapshot_step;
                         if (n_now > 0 && n_now % step == 0) {
