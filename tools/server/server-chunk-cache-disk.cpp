@@ -56,11 +56,28 @@ public:
             return false;
         }
 
+        if (st.st_size == 0) {
+            // Zero-byte cache entry (see put()): nothing to read, and this also
+            // sidesteps posix_memalign(..., 0, ...)'s implementation-defined
+            // behavior for a 0-byte request below.
+            close(fd);
+            data.clear();
+            return true;
+        }
+
         aligned_buffer buf((size_t) st.st_size);
         if (!buf.ptr) {
             close(fd);
             return false;
         }
+        // put() truncates the file down to its real, possibly-unaligned size, but we
+        // still issue this read for the full 4096-aligned buffer size. Linux O_DIRECT
+        // is documented to permit a read to return fewer bytes than requested when the
+        // request runs past EOF, so `n == st.st_size` (not `n == buf.size`) is the
+        // success case here -- a short read that stops exactly at st.st_size is
+        // expected/relied-upon, not an error. This is Linux-specific behavior (not
+        // guaranteed on all filesystems, e.g. some network filesystems), which is why
+        // we still check `n < st.st_size` below rather than assuming a full read.
         ssize_t n = read(fd, buf.ptr, buf.size);
         close(fd);
         if (n < (ssize_t) st.st_size) {
@@ -74,6 +91,22 @@ public:
     void put(const chunk_key & key, std::vector<uint8_t> data) override {
         const std::string path = dir + "/" + key_to_filename(key);
         const std::string tmp_path = path + ".tmp";
+
+        if (data.empty()) {
+            // Nothing to align or write via O_DIRECT for a zero-byte value, and
+            // posix_memalign(..., 0, ...) below is implementation-defined: glibc may
+            // legitimately return NULL with a "success" status for a 0-byte request,
+            // which the `!buf.ptr` failure check further down can't distinguish from a
+            // genuine allocation failure -- silently dropping the write. Skip the
+            // O_DIRECT path entirely and just materialize an empty file directly.
+            int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0) {
+                return;
+            }
+            close(fd);
+            rename(tmp_path.c_str(), path.c_str());
+            return;
+        }
 
         aligned_buffer buf(data.size());
         if (!buf.ptr) {

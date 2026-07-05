@@ -44,6 +44,23 @@ int main() {
         return 1;
     }
 
+    // A zero-byte value: put() must not silently no-op just because
+    // posix_memalign(..., 0, ...) has implementation-defined behavior for a 0-byte
+    // request (glibc may return NULL with "success" for that case). Confirms the
+    // dedicated zero-byte path in put()/get() round-trips correctly.
+    chunk_key k3{ "fp1", 333 };
+    std::vector<uint8_t> data_in3;
+    backend->put(k3, data_in3);
+    std::vector<uint8_t> data_out4;
+    if (!backend->get(k3, data_out4)) {
+        fprintf(stderr, "FAIL: backend->get(k3, ...) missed right after put of a zero-byte value (expected a hit)\n");
+        return 1;
+    }
+    if (!data_out4.empty()) {
+        fprintf(stderr, "FAIL: data_out4 is not empty (expected get() to return 0 bytes for a zero-byte put())\n");
+        return 1;
+    }
+
     // A second backend instance pointed at the same directory sees the same data --
     // proving this is real disk persistence, not in-process caching.
     auto backend2 = make_disk_chunk_cache_backend(dir);
