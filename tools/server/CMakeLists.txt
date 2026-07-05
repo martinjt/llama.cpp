@@ -9,6 +9,7 @@ add_library(${TARGET} STATIC
     server-chat.h
     server-chunk-cache.h
     server-chunk-cache-ram.cpp
+    server-chunk-cache-disk.cpp
     server-task.cpp
     server-task.h
     server-queue.cpp
