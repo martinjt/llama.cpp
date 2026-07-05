@@ -25,9 +25,18 @@ int main() {
     const std::string fp_b = common_weights_fingerprint(path_b);
     const std::string fp_c = common_weights_fingerprint(path_c);
 
-    assert(!fp_a.empty());
-    assert(fp_a == fp_c);   // identical content -> identical fingerprint
-    assert(fp_a != fp_b);   // one differing byte -> different fingerprint
+    if (fp_a.empty()) {
+        fprintf(stderr, "FAIL: fp_a is empty (expected a non-empty fingerprint)\n");
+        return 1;
+    }
+    if (fp_a != fp_c) {
+        fprintf(stderr, "FAIL: fp_a != fp_c (expected identical content to produce identical fingerprint)\n");
+        return 1;
+    }
+    if (fp_a == fp_b) {
+        fprintf(stderr, "FAIL: fp_a == fp_b (expected a single differing byte to produce a different fingerprint)\n");
+        return 1;
+    }
 
     std::remove(path_a);
     std::remove(path_b);
