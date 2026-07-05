@@ -1421,8 +1421,8 @@ private:
             SRV_TRC("chunk cache backend: ram, size limit: %d MiB\n", params_base.chunk_cache_ram_mib);
             chunk_cache = make_ram_chunk_cache_backend(params_base.chunk_cache_ram_mib);
         } else if (params_base.chunk_cache_backend == "disk") {
-            SRV_TRC("chunk cache backend: disk, path: %s\n", params_base.chunk_cache_path.c_str());
-            chunk_cache = make_disk_chunk_cache_backend(params_base.chunk_cache_path);
+            SRV_TRC("chunk cache backend: disk, path: %s, quota: %d MiB\n", params_base.chunk_cache_path.c_str(), params_base.chunk_cache_disk_quota_mib);
+            chunk_cache = make_disk_chunk_cache_backend(params_base.chunk_cache_path, params_base.chunk_cache_disk_quota_mib);
         } else if (params_base.chunk_cache_backend == "lmcache") {
             // note: --chunk-cache-path is already validated as host:port for the lmcache
             //       backend in common_params_parse() (common/arg.cpp); this is a defensive

@@ -2,10 +2,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 namespace {
 
@@ -39,7 +42,8 @@ struct aligned_buffer {
 
 class disk_chunk_cache_backend : public chunk_cache_backend {
 public:
-    explicit disk_chunk_cache_backend(std::string dir) : dir(std::move(dir)) {}
+    disk_chunk_cache_backend(std::string dir, size_t limit_mib)
+        : dir(std::move(dir)), limit_bytes(limit_mib * 1024ull * 1024ull) {}
 
     bool get(const chunk_key & key, std::vector<uint8_t> & data) override {
         const std::string path = dir + "/" + key_to_filename(key);
@@ -62,6 +66,7 @@ public:
             // behavior for a 0-byte request below.
             close(fd);
             data.clear();
+            touch_mtime(path);
             return true;
         }
 
@@ -85,6 +90,7 @@ public:
         }
 
         data.assign(buf.ptr, buf.ptr + st.st_size);
+        touch_mtime(path);
         return true;
     }
 
@@ -105,6 +111,8 @@ public:
             }
             close(fd);
             rename(tmp_path.c_str(), path.c_str());
+            touch_mtime(path);
+            evict_if_over_quota();
             return;
         }
 
@@ -132,14 +140,76 @@ public:
             return;
         }
         rename(tmp_path.c_str(), path.c_str());
+        touch_mtime(path);
+        evict_if_over_quota();
     }
 
 private:
+    // mtime is used as the recency signal (rather than an in-memory LRU list, cf. the ram
+    // backend) because the disk backend's whole purpose is surviving restarts: touched on
+    // both get() hits and put() writes, then eviction scans the directory and sorts by mtime.
+    //
+    // utimensat(..., nullptr, ...) (UTIME_NOW) resolves to the kernel's *coarse* real-time
+    // clock, which is only refreshed once per timer tick -- two touches issued within the same
+    // tick (e.g. a put() immediately followed by another put()'s eviction scan) can come back
+    // bit-for-bit identical even down to the nanosecond field, making ordering ambiguous for
+    // std::sort (which is not stable). Sampling CLOCK_REALTIME from userspace and passing it
+    // explicitly avoids the coarse-clock path and gives genuinely distinct timestamps.
+    static void touch_mtime(const std::string & path) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        const struct timespec times[2] = { now, now };
+        utimensat(AT_FDCWD, path.c_str(), times, 0);
+    }
+
+    void evict_if_over_quota() {
+        // Nanosecond-resolution mtime (st_mtim, not the seconds-only st_mtime alias) matters
+        // here: a touch_mtime() from get() and a put() elsewhere can legitimately land in the
+        // same wall-clock second, and std::sort is not stable, so a seconds-only tiebreak can
+        // evict the just-touched (recent) entry instead of the truly stale one.
+        struct entry { std::string path; struct timespec mtime; size_t size; };
+        std::vector<entry> entries;
+        size_t total = 0;
+
+        DIR * d = opendir(dir.c_str());
+        if (!d) return;
+        struct dirent * de;
+        while ((de = readdir(d)) != nullptr) {
+            if (de->d_name[0] == '.') continue;
+            const std::string name = de->d_name;
+            if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0) {
+                // in-flight write from a concurrent/interrupted put() -- not a real entry.
+                continue;
+            }
+            const std::string path = dir + "/" + name;
+            struct stat st;
+            if (stat(path.c_str(), &st) != 0) continue;
+            entries.push_back({path, st.st_mtim, (size_t) st.st_size});
+            total += (size_t) st.st_size;
+        }
+        closedir(d);
+
+        if (total <= limit_bytes) return;
+
+        std::sort(entries.begin(), entries.end(), [](const entry & a, const entry & b) {
+            if (a.mtime.tv_sec != b.mtime.tv_sec) return a.mtime.tv_sec < b.mtime.tv_sec;
+            return a.mtime.tv_nsec < b.mtime.tv_nsec; // oldest (least-recently-touched) first
+        });
+
+        for (const auto & e : entries) {
+            if (total <= limit_bytes) break;
+            if (unlink(e.path.c_str()) == 0) {
+                total -= e.size;
+            }
+        }
+    }
+
     std::string dir;
+    size_t limit_bytes;
 };
 
 } // namespace
 
-std::unique_ptr<chunk_cache_backend> make_disk_chunk_cache_backend(const std::string & dir) {
-    return std::make_unique<disk_chunk_cache_backend>(dir);
+std::unique_ptr<chunk_cache_backend> make_disk_chunk_cache_backend(const std::string & dir, size_t limit_mib) {
+    return std::make_unique<disk_chunk_cache_backend>(dir, limit_mib);
 }

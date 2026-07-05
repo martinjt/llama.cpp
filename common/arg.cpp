@@ -1521,6 +1521,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CHUNK_CACHE_RAM_MIB").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--chunk-cache-disk-quota-mib"}, "N",
+        string_format("size limit in MiB for the content-addressed chunk cache when using the disk backend (default: %d)", params.chunk_cache_disk_quota_mib),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("--chunk-cache-disk-quota-mib must be positive");
+            }
+            params.chunk_cache_disk_quota_mib = value;
+        }
+    ).set_env("LLAMA_ARG_CHUNK_CACHE_DISK_QUOTA_MIB").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--chunk-cache-snapshot-step"}, "N",
         string_format("token interval between full-state snapshots for the content-addressed cache (default: %d)", params.chunk_cache_snapshot_step),
         [](common_params & params, int value) {
