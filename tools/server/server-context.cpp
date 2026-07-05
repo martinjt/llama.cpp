@@ -11,6 +11,8 @@
 
 #include "build-info.h"
 #include "common.h"
+#include "weights-fingerprint.h"
+#include "server-snapshot-hash.h"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -927,6 +929,11 @@ private:
     // nullptr if disabled (chunk_cache_backend == "")
     std::unique_ptr<chunk_cache_backend> chunk_cache;
 
+    // fingerprint of the loaded model's weights, folded into every chunk_cache key so a
+    // silent weights swap under the same preset can never be served a stale snapshot.
+    // only computed when chunk_cache is enabled.
+    std::string weights_fingerprint;
+
     server_metrics metrics;
 
     json json_ui_settings = json::object();
@@ -1417,6 +1424,11 @@ private:
         }
         SRV_TRC("%s", "for more info see https://github.com/ggml-org/llama.cpp/pull/16391\n");
 
+        if (!params_base.chunk_cache_backend.empty()) {
+            weights_fingerprint = common_weights_fingerprint(params_base.model.path);
+            SRV_INF("chunk cache: model weights fingerprint = %s\n", weights_fingerprint.c_str());
+        }
+
         if (params_base.chunk_cache_backend == "ram") {
             SRV_TRC("chunk cache backend: ram, size limit: %d MiB\n", params_base.chunk_cache_ram_mib);
             chunk_cache = make_ram_chunk_cache_backend(params_base.chunk_cache_ram_mib);
@@ -1725,6 +1737,49 @@ private:
                 prompt_cache->update();
 
                 SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+            }
+        }
+
+        // primary snapshot path: consult the externally-persisted, content-hash-keyed chunk
+        // cache for a longer usable prefix than whatever is already resident in the selected
+        // slot, and restore that full-state snapshot into the slot's sequence. this is a
+        // separate mechanism from the in-memory server_prompt_cache LCP restore above and from
+        // the per-slot PARTIAL_ONLY context checkpoints in update_slots().
+        if (ret && chunk_cache && task.type == SERVER_TASK_TYPE_COMPLETION) {
+            const llama_tokens & req_tokens = task.tokens.get_text_tokens();
+            const size_t step = (size_t) params_base.chunk_cache_snapshot_step;
+            const size_t cur_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
+
+            // walk step-aligned prefix lengths from longest to shortest, restoring the first
+            // (longest) snapshot that exists and beats what the slot already holds.
+            for (size_t n = (task.tokens.size() / step) * step; n >= step && n > cur_prefix; n -= step) {
+                chunk_key key{ weights_fingerprint, compute_snapshot_hash(req_tokens, n, weights_fingerprint) };
+
+                std::vector<uint8_t> blob;
+                if (!chunk_cache->get(key, blob)) {
+                    continue;
+                }
+
+                const size_t got = llama_state_seq_set_data_ext(ctx_tgt, blob.data(), blob.size(), ret->id, 0);
+                if (got != blob.size()) {
+                    SLT_WRN(*ret, "chunk cache: snapshot restore failed at n=%zu (restored %zu of %zu bytes), forcing recompute\n",
+                            n, got, blob.size());
+                    // a partial write may have left the sequence inconsistent; wipe it so the
+                    // slot cleanly falls back to a full recompute
+                    llama_memory_seq_rm(llama_get_memory(ctx_tgt), ret->id, -1, -1);
+                    ret->prompt.tokens.clear();
+                    ret->prompt.checkpoints.clear();
+                    break;
+                }
+
+                // make slot.prompt.tokens exactly the restored prefix so update_slots() sees a
+                // common prefix of n and only decodes the remainder
+                ret->prompt.tokens = task.tokens.clone();
+                ret->prompt.tokens.keep_first(n);
+                ret->prompt.checkpoints.clear();
+
+                SLT_INF(*ret, "chunk cache: restored full-state snapshot, prefix n=%zu tokens\n", n);
+                break;
             }
         }
 
@@ -3121,6 +3176,37 @@ private:
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                     const auto & input_tokens = slot.task->tokens;
 
+                    // primary snapshot path: when a mid-prefill slot's resident sequence length
+                    // lands exactly on a snapshot-step boundary, persist a full-state snapshot of
+                    // that token prefix keyed by its content hash. we only do this for
+                    // PROCESSING_PROMPT (not STARTED, whose prompt may be stale from a prior
+                    // request, and not GENERATING, whose last sampled token is not yet decoded
+                    // into the KV cache) so that the captured state exactly matches the key. this
+                    // is a separate mechanism from the PARTIAL_ONLY context checkpoints below.
+                    if (chunk_cache &&
+                        slot.state == SLOT_STATE_PROCESSING_PROMPT &&
+                        slot.task->type == SERVER_TASK_TYPE_COMPLETION) {
+                        const int64_t n_now = slot.prompt.n_tokens();
+                        const int64_t step  = params_base.chunk_cache_snapshot_step;
+                        if (n_now > 0 && n_now % step == 0) {
+                            const llama_tokens & toks = slot.prompt.tokens.get_text_tokens();
+                            chunk_key key{ weights_fingerprint, compute_snapshot_hash(toks, (size_t) n_now, weights_fingerprint) };
+
+                            std::vector<uint8_t> existing;
+                            if (!chunk_cache->get(key, existing)) {
+                                const size_t size = llama_state_seq_get_size_ext(ctx_tgt, slot.id, 0);
+                                std::vector<uint8_t> blob(size);
+                                const size_t got = llama_state_seq_get_data_ext(ctx_tgt, blob.data(), size, slot.id, 0);
+                                if (got == size) {
+                                    chunk_cache->put(key, std::move(blob));
+                                    SLT_TRC(slot, "chunk cache: stored full-state snapshot at n=%" PRId64 " tokens (%zu bytes)\n", n_now, size);
+                                } else {
+                                    SLT_WRN(slot, "chunk cache: snapshot capture failed at n=%" PRId64 " (got %zu of %zu bytes)\n", n_now, got, size);
+                                }
+                            }
+                        }
+                    }
+
                     // used to determine the number of tokens added to the batch for the current slot
                     const auto n_tokens_prev = batch.size();
 
@@ -3527,6 +3613,16 @@ private:
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
+
+                        // end the prefill batch exactly on a snapshot-step boundary so the
+                        // primary chunk-cache path (below) can persist a full-state snapshot of
+                        // this precise token prefix once this batch has been decoded. splitting a
+                        // causal prompt at a smaller boundary does not change the resulting KV.
+                        if (chunk_cache &&
+                            slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
+                            slot.prompt.n_tokens() % params_base.chunk_cache_snapshot_step == 0) {
+                            break;
+                        }
 
                         // stop the prompt batch exactly before a user message
                         if (spans.is_user_start(slot.prompt.n_tokens())) {

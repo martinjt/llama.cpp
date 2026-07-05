@@ -106,6 +106,9 @@ class ServerProcess:
     sleep_idle_seconds: int | None = None
     cache_ram: int | None = None
     no_cache_idle_slots: bool = False
+    chunk_cache_backend: str | None = None
+    chunk_cache_path: str | None = None
+    chunk_cache_snapshot_step: int | None = None
     log_path: str | None = None
     ui_mcp_proxy: bool = False
     backend_sampling: bool = False
@@ -251,6 +254,12 @@ class ServerProcess:
             server_args.extend(["--cache-ram", self.cache_ram])
         if self.no_cache_idle_slots:
             server_args.append("--no-cache-idle-slots")
+        if self.chunk_cache_backend is not None:
+            server_args.extend(["--chunk-cache-backend", self.chunk_cache_backend])
+        if self.chunk_cache_path is not None:
+            server_args.extend(["--chunk-cache-path", self.chunk_cache_path])
+        if self.chunk_cache_snapshot_step is not None:
+            server_args.extend(["--chunk-cache-snapshot-step", self.chunk_cache_snapshot_step])
         if self.ui_mcp_proxy:
             server_args.append("--ui-mcp-proxy")
         if self.backend_sampling:
