@@ -1,5 +1,26 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
+# server-memory-detect: isolates the one place server code reaches into llama's internal
+# src/ headers (to dynamic_cast llama_get_memory()'s result against the concrete memory-type
+# classes). Kept as its own tiny target, rather than folded into server-context, so that (a) the
+# ${CMAKE_SOURCE_DIR}/src include path -- and the heavier internal headers it pulls in
+# (llama-graph.h, llama-batch.h, ...) -- doesn't leak into the rest of the large server-context
+# target, and (b) a standalone test can link just this and llama, without the whole server.
+
+set(TARGET server-memory-detect)
+
+add_library(${TARGET} STATIC
+    server-memory-detect.cpp
+    server-memory-detect.h
+)
+
+target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(${TARGET} PUBLIC llama)
+
+if (BUILD_SHARED_LIBS)
+    set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 # server-context containing the core server logic, used by llama-server and CLI
 
 set(TARGET server-context)
@@ -13,6 +34,8 @@ add_library(${TARGET} STATIC
     server-chunk-cache-lmcache.cpp
     server-snapshot-hash.h
     server-snapshot-hash.cpp
+    server-chunk-hash.h
+    server-chunk-hash.cpp
     server-task.cpp
     server-task.h
     server-queue.cpp
@@ -35,7 +58,7 @@ endif()
 
 target_include_directories(${TARGET} PRIVATE ../mtmd)
 target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PUBLIC llama-common mtmd server-memory-detect ${CMAKE_THREAD_LIBS_INIT})
 
 option(LLAMA_OTEL "Enable OpenTelemetry trace export" OFF)
 

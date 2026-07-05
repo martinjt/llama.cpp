@@ -170,6 +170,9 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     llama_build_and_test(test-snapshot-hash.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     target_include_directories(test-snapshot-hash PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
     target_link_libraries(test-snapshot-hash PRIVATE server-context)
+    llama_build_and_test(test-chunk-hash.cpp WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+    target_include_directories(test-chunk-hash PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
+    target_link_libraries(test-chunk-hash PRIVATE server-context)
     # TODO: disabled on loongarch64 because the ggml-ci node lacks Python 3.8
     if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "loongarch64")
         llama_build_and_test(test-json-schema-to-grammar.cpp   WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
@@ -268,6 +271,17 @@ set_tests_properties(test-recurrent-state-rollback PROPERTIES FIXTURES_REQUIRED 
 
 llama_build_and_test(test-kv-cache-range.cpp LABEL "model" ARGS "${MODEL_DEST}")
 set_tests_properties(test-kv-cache-range PROPERTIES FIXTURES_REQUIRED test-download-model)
+
+# model_supports_range_cache() lives in the small server-memory-detect target (not
+# server-context) precisely so this test can link it directly without pulling in the rest of
+# the server. The stories15M download above is a plain-attention llama-arch model, so it
+# exercises the "eligible" side; a hybrid-model fixture to exercise the "not eligible" side
+# doesn't exist in this test suite yet (see server-memory-detect.h) -- documented gap, not
+# fabricated.
+llama_build_and_test(test-model-supports-range-cache.cpp LABEL "model" ARGS "${MODEL_DEST}")
+target_include_directories(test-model-supports-range-cache PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
+target_link_libraries(test-model-supports-range-cache PRIVATE server-memory-detect)
+set_tests_properties(test-model-supports-range-cache PROPERTIES FIXTURES_REQUIRED test-download-model)
 
 # Test state save/load functionality
 llama_build_and_test(test-save-load-state.cpp LABEL "model" ARGS -m "${MODEL_DEST}")
