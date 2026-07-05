@@ -165,7 +165,13 @@ def test_chunk_cache_snapshot_restore_is_bit_correct():
 
 def test_chunk_cache_opt_out_header():
     """The x-chunk-cache: off header must bypass the chunk-cache lookup entirely,
-    forcing a cold recompute even when a cached snapshot exists."""
+    forcing a cold recompute even when a cached snapshot exists.
+
+    Note: the server must be restarted between the warm-up request and the
+    opt-out request. Without a restart, the *same* slot stays resident in memory
+    and llama-server's ordinary same-process slot reuse (independent of the
+    on-disk chunk cache under test here) would also produce cache_n > 0,
+    making the assertion meaningless either way it comes out."""
     global server
     cache_dir = tempfile.mkdtemp(prefix="cc-opt-out-")
     try:
@@ -174,16 +180,34 @@ def test_chunk_cache_opt_out_header():
         server.chunk_cache_snapshot_step = 64
         server.start()
 
-        prompt = "The quick brown fox " * 200
+        prompt = LONG_PROMPT  # 200 reps exceeded the tiny model's 2048-token ctx; use the already-safe 100-rep constant
 
-        # First request: warm up the cache
+        # First request: warm up the on-disk cache
         res1 = server.make_request("POST", "/completion", data={
             "prompt": prompt, "n_predict": 1
         })
         assert res1.status_code == 200
 
-        # Second request: same prompt but with opt-out header
-        # Should NOT reuse cache, so cache_n should be 0
+        # drop all in-process slot/KV state so any reuse below can only come
+        # from the externally-persisted chunk cache
+        server.stop()
+        server.start()
+
+        # sanity control: without the header, a fresh process DOES restore from
+        # the on-disk snapshot -- proving one is genuinely there to opt out of
+        control = server.make_request("POST", "/completion", data={
+            "prompt": prompt, "n_predict": 1
+        })
+        assert control.status_code == 200
+        assert control.body["timings"]["cache_n"] > 0, (
+            "sanity check failed: expected a snapshot to exist on disk to opt out of"
+        )
+
+        server.stop()
+        server.start()
+
+        # Same prompt, but with the opt-out header: must NOT reuse the snapshot
+        # that the sanity control just proved exists.
         res2 = server.make_request(
             "POST", "/completion",
             data={"prompt": prompt, "n_predict": 1},
@@ -194,6 +218,101 @@ def test_chunk_cache_opt_out_header():
         assert cache_n == 0, (
             f"expected opt-out header to bypass cache (cache_n=0), "
             f"but got cache_n={cache_n}"
+        )
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_chunk_cache_opt_out_header_disables_capture():
+    """The x-chunk-cache: off header must also disable CAPTURING this request's
+    prompt prefix into the chunk cache, not just restoring from it. A request sent
+    with the header must leave the on-disk cache untouched, and a later request for
+    the identical prompt (without the header, after a restart to drop in-process
+    slot state) must find nothing to reuse -- proving the capture-side gate
+    (update_slots()), not just the restore-side gate (get_available_slot()),
+    honored the opt-out."""
+    global server
+    cache_dir = tempfile.mkdtemp(prefix="cc-opt-out-capture-")
+    try:
+        server.chunk_cache_backend = "disk"
+        server.chunk_cache_path = cache_dir
+        server.chunk_cache_snapshot_step = 64
+        server.start()
+
+        prompt = LONG_PROMPT  # 200 reps exceeded the tiny model's 2048-token ctx; use the already-safe 100-rep constant
+
+        # Request sent with the opt-out header: must not write anything to the
+        # on-disk cache.
+        res1 = server.make_request(
+            "POST", "/completion",
+            data={"prompt": prompt, "n_predict": 1},
+            headers={"x-chunk-cache": "off"},
+        )
+        assert res1.status_code == 200
+
+        cache_files_after_opt_out = os.listdir(cache_dir)
+        assert cache_files_after_opt_out == [], (
+            "expected opt-out request to write nothing to the on-disk chunk "
+            f"cache, but found: {cache_files_after_opt_out}"
+        )
+
+        # drop all in-process slot/KV state: a subsequent identical request can
+        # then only show reuse if the on-disk chunk cache holds something, which
+        # it must not, since the only request so far was opted out.
+        server.stop()
+        server.start()
+
+        res2 = server.make_request("POST", "/completion", data={
+            "prompt": prompt, "n_predict": 1,
+        })
+        assert res2.status_code == 200
+        cache_n = res2.body.get("timings", {}).get("cache_n", 0)
+        assert cache_n == 0, (
+            "expected no cache reuse for a fresh request following an opted-out "
+            f"capture, but got cache_n={cache_n}"
+        )
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def test_chunk_cache_opt_out_header_case_insensitive_value():
+    """The opt-out header's VALUE must be matched case-insensitively: 'Off', 'OFF',
+    'oFf', etc. must all opt out, not just the exact lowercase 'off'. Uses a mixed
+    case HEADER NAME too ("X-Chunk-Cache"), since server_http_req::headers is a
+    plain case-sensitive std::map and a naive std::map::find("x-chunk-cache")
+    would otherwise miss this common on-the-wire capitalization entirely."""
+    global server
+    cache_dir = tempfile.mkdtemp(prefix="cc-opt-out-case-")
+    try:
+        server.chunk_cache_backend = "disk"
+        server.chunk_cache_path = cache_dir
+        server.chunk_cache_snapshot_step = 64
+        server.start()
+
+        prompt = LONG_PROMPT  # 200 reps exceeded the tiny model's 2048-token ctx; use the already-safe 100-rep constant
+
+        # First request: warm up the on-disk cache
+        res1 = server.make_request("POST", "/completion", data={
+            "prompt": prompt, "n_predict": 1
+        })
+        assert res1.status_code == 200
+
+        # drop all in-process slot/KV state so any reuse below can only come
+        # from the externally-persisted chunk cache
+        server.stop()
+        server.start()
+
+        # Same prompt, opt-out header with mixed-case name AND value
+        res2 = server.make_request(
+            "POST", "/completion",
+            data={"prompt": prompt, "n_predict": 1},
+            headers={"X-Chunk-Cache": "OFF"},
+        )
+        assert res2.status_code == 200
+        cache_n = res2.body.get("timings", {}).get("cache_n", 0)
+        assert cache_n == 0, (
+            "expected case-insensitive opt-out header (name and value) to bypass "
+            f"cache (cache_n=0), but got cache_n={cache_n}"
         )
     finally:
         shutil.rmtree(cache_dir, ignore_errors=True)

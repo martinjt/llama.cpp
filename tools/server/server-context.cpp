@@ -50,6 +50,21 @@ constexpr int HTTP_POLLING_SECONDS = 1;
 // than the primary snapshot path's chunk_cache_snapshot_step, which is why this path exists.
 constexpr size_t CHUNK_CACHE_RANGE_CHUNK_SIZE = 256;
 
+// server_http_req::headers is a plain std::map<std::string, std::string> (see server-http.h),
+// populated in server-http.cpp's get_headers() by copying key-for-key out of httplib's own
+// case_ignore-hashed Headers multimap. httplib's parse_header() never lowercases the field
+// name it read off the wire (vendor/cpp-httplib/httplib.cpp), so the case-insensitive lookup
+// httplib provides on *its* container is lost the moment the copy lands in a std::map with the
+// default (case-sensitive) comparator. Any header name lookup against req.headers therefore
+// needs an explicit case-insensitive comparison -- same reasoning already applied to header
+// names in server-models.cpp's to_lower_copy()/should_strip_proxy_header() and
+// server-cors-proxy.h's proxy_header_to_lower().
+static std::string server_str_to_lower(const std::string & value) {
+    std::string lowered(value.size(), '\0');
+    std::transform(value.begin(), value.end(), lowered.begin(), [](unsigned char c) { return std::tolower(c); });
+    return lowered;
+}
+
 static uint32_t server_n_outputs_max(const common_params & params) {
     const uint32_t n_batch  = params.n_batch;
 
@@ -3281,7 +3296,8 @@ private:
                     if (chunk_cache &&
                         slot.state == SLOT_STATE_PROCESSING_PROMPT &&
                         slot.task->type == SERVER_TASK_TYPE_COMPLETION &&
-                        !slot.prompt.tokens.has_mtmd) {
+                        !slot.prompt.tokens.has_mtmd &&
+                        !slot.task->params.opt_out_chunk_cache) {
                         const int64_t n_now = slot.prompt.n_tokens();
 
                         if (model_supports_range_cache(ctx_tgt)) {
@@ -4427,9 +4443,18 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.oaicompat_model   = meta->model_name;
 
             // parse per-request opt-out header for chunk-cache
+            // both the header name and its value are matched case-insensitively: req.headers is a
+            // plain (case-sensitive) std::map -- see server_str_to_lower's comment above for why a
+            // straight std::map::find on the header name cannot be relied on to be case-insensitive
+            // here -- and the value is compared the same way so "Off"/"OFF"/"oFf" etc. all opt out.
             {
-                auto it = req.headers.find("x-chunk-cache");
-                task.params.opt_out_chunk_cache = (it != req.headers.end() && it->second == "off");
+                task.params.opt_out_chunk_cache = false;
+                for (const auto & [key, value] : req.headers) {
+                    if (server_str_to_lower(key) == "x-chunk-cache") {
+                        task.params.opt_out_chunk_cache = (server_str_to_lower(value) == "off");
+                        break;
+                    }
+                }
             }
 
             // prepare child tasks
