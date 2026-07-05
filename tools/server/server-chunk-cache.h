@@ -24,3 +24,4 @@ public:
 
 std::unique_ptr<chunk_cache_backend> make_ram_chunk_cache_backend(size_t limit_mib);
 std::unique_ptr<chunk_cache_backend> make_disk_chunk_cache_backend(const std::string & dir);
+std::unique_ptr<chunk_cache_backend> make_lmcache_chunk_cache_backend(const std::string & host, int port);

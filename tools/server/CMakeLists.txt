@@ -10,6 +10,7 @@ add_library(${TARGET} STATIC
     server-chunk-cache.h
     server-chunk-cache-ram.cpp
     server-chunk-cache-disk.cpp
+    server-chunk-cache-lmcache.cpp
     server-task.cpp
     server-task.h
     server-queue.cpp
