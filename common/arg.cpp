@@ -703,6 +703,28 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         throw std::invalid_argument("error: --prompt-cache-all not supported in interactive mode yet\n");
     }
 
+    if (params.chunk_cache_backend == "lmcache") {
+        const size_t colon = params.chunk_cache_path.find(':');
+        bool valid = colon != std::string::npos && colon > 0 && colon + 1 < params.chunk_cache_path.size();
+        if (valid) {
+            const std::string port_str = params.chunk_cache_path.substr(colon + 1);
+            valid = !port_str.empty() && port_str.find_first_not_of("0123456789") == std::string::npos;
+        }
+        if (valid) {
+            try {
+                size_t pos = 0;
+                const int port = std::stoi(params.chunk_cache_path.substr(colon + 1), &pos);
+                valid = pos == params.chunk_cache_path.size() - colon - 1 && port > 0 && port <= 65535;
+            } catch (const std::exception &) {
+                valid = false;
+            }
+        }
+        if (!valid) {
+            throw std::invalid_argument(
+                "--chunk-cache-path for lmcache backend must be host:port, got: " + params.chunk_cache_path);
+        }
+    }
+
     const bool skip_model_download =
         // server will call common_params_handle_models() later, so we skip it here
         ctx_arg.ex == LLAMA_EXAMPLE_SERVER ||
@@ -1488,6 +1510,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.chunk_cache_path = value;
         }
     ).set_env("LLAMA_ARG_CHUNK_CACHE_PATH").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--chunk-cache-ram-mib"}, "N",
+        string_format("size limit in MiB for the content-addressed chunk cache when using the ram backend (default: %d)", params.chunk_cache_ram_mib),
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("--chunk-cache-ram-mib must be positive");
+            }
+            params.chunk_cache_ram_mib = value;
+        }
+    ).set_env("LLAMA_ARG_CHUNK_CACHE_RAM_MIB").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--chunk-cache-snapshot-step"}, "N",
         string_format("token interval between full-state snapshots for the content-addressed cache (default: %d)", params.chunk_cache_snapshot_step),

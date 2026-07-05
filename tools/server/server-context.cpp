@@ -1424,9 +1424,28 @@ private:
             SRV_TRC("chunk cache backend: disk, path: %s\n", params_base.chunk_cache_path.c_str());
             chunk_cache = make_disk_chunk_cache_backend(params_base.chunk_cache_path);
         } else if (params_base.chunk_cache_backend == "lmcache") {
+            // note: --chunk-cache-path is already validated as host:port for the lmcache
+            //       backend in common_params_parse() (common/arg.cpp); this is a defensive
+            //       re-check so a malformed value can never reach std::stoi() unguarded and
+            //       crash the process with an uncaught exception.
             const size_t colon = params_base.chunk_cache_path.find(':');
+            bool valid = colon != std::string::npos && colon > 0 && colon + 1 < params_base.chunk_cache_path.size();
+            int port = 0;
+            if (valid) {
+                const std::string port_str = params_base.chunk_cache_path.substr(colon + 1);
+                try {
+                    size_t pos = 0;
+                    port  = std::stoi(port_str, &pos);
+                    valid = pos == port_str.size() && port > 0 && port <= 65535;
+                } catch (const std::exception &) {
+                    valid = false;
+                }
+            }
+            if (!valid) {
+                throw std::invalid_argument(
+                    "--chunk-cache-path for lmcache backend must be host:port, got: " + params_base.chunk_cache_path);
+            }
             const std::string host = params_base.chunk_cache_path.substr(0, colon);
-            const int port = std::stoi(params_base.chunk_cache_path.substr(colon + 1));
             SRV_TRC("chunk cache backend: lmcache, target: %s:%d\n", host.c_str(), port);
             chunk_cache = make_lmcache_chunk_cache_backend(host, port);
         }
