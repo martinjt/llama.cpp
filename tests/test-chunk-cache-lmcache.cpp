@@ -2,9 +2,42 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+// Standalone connectivity probe: opens a raw TCP socket to host:port and immediately
+// closes it. Used only to distinguish "no lmcache_server reachable at all" (skip) from
+// "server reachable but protocol/logic is broken" (hard fail) -- deliberately does not
+// reuse chunk_cache_backend::get()/put(), whose internal failure paths conflate both
+// cases into a single `false`/no-op return.
+static bool lmcache_server_reachable(const char * host, int port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t) port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        close(fd);
+        return false;
+    }
+    bool ok = connect(fd, (sockaddr *) &addr, sizeof(addr)) == 0;
+    close(fd);
+    return ok;
+}
+
 int main() {
     const char * host = getenv("LMCACHE_TEST_HOST") ? getenv("LMCACHE_TEST_HOST") : "127.0.0.1";
     const int port = getenv("LMCACHE_TEST_PORT") ? atoi(getenv("LMCACHE_TEST_PORT")) : 65432;
+
+    if (!lmcache_server_reachable(host, port)) {
+        printf("SKIP: no lmcache_server reachable at %s:%d (set LMCACHE_TEST_HOST/LMCACHE_TEST_PORT, "
+               "or start `lmcache_server %s %d` to run this test for real)\n", host, port, host, port);
+        exit(EXIT_SUCCESS);
+    }
 
     auto backend = make_lmcache_chunk_cache_backend(host, port);
 
