@@ -181,5 +181,48 @@ int main() {
         printf("OK: disk chunk cache backend sweeps orphaned .tmp files on construction\n");
     }
 
+    // Large-blob round-trip (> the Linux 0x7ffff000 ~2 GiB single-syscall read()/write() cap):
+    // a full-state snapshot of a large model at a high token boundary readily exceeds 2 GiB, and
+    // a single read()/write() returns a short count past that cap. Before the chunked-I/O fix,
+    // put()/get() treated the short count as failure and silently dropped the blob (get() miss ->
+    // forced recompute, so the cache silently never worked for such models). This exercises the
+    // aligned chunked-I/O loop end-to-end. Gated behind CHUNK_CACHE_LARGE_TEST because it needs
+    // ~2 GiB of RAM plus ~2 GiB of scratch disk, which is more than a default CI runner should
+    // assume; enable it explicitly to run the regression.
+    if (const char * v = getenv("CHUNK_CACHE_LARGE_TEST"); v && v[0] == '1') {
+        const std::string dir4 = "/tmp/chunk_cache_disk_large_test";
+        std::filesystem::remove_all(dir4);
+        std::filesystem::create_directories(dir4);
+
+        auto big_backend = make_disk_chunk_cache_backend(dir4, /*limit_mib=*/8192);
+
+        // Just over the ~2 GiB cap so the chunked loop must iterate at least twice.
+        const size_t n = (2ull << 30) + (64ull << 20); // 2 GiB + 64 MiB
+        std::vector<uint8_t> big_in(n);
+        for (size_t i = 0; i < n; i++) {
+            big_in[i] = (uint8_t)((i * 1103515245u + 12345u) >> 16); // position-dependent pattern
+        }
+
+        chunk_key kbig{ "fp1", 555 };
+        big_backend->put(kbig, big_in);
+
+        std::vector<uint8_t> big_out;
+        if (!big_backend->get(kbig, big_out)) {
+            fprintf(stderr, "FAIL: get() missed a >2 GiB blob right after put() (single-syscall 2 GiB cap not handled)\n");
+            return 1;
+        }
+        if (big_out.size() != big_in.size()) {
+            fprintf(stderr, "FAIL: >2 GiB blob came back truncated (%zu of %zu bytes)\n", big_out.size(), big_in.size());
+            return 1;
+        }
+        if (big_out != big_in) {
+            fprintf(stderr, "FAIL: >2 GiB blob round-tripped with corrupted/misplaced bytes\n");
+            return 1;
+        }
+
+        std::filesystem::remove_all(dir4);
+        printf("OK: disk chunk cache backend round-trips a >2 GiB blob\n");
+    }
+
     return 0;
 }

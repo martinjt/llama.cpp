@@ -14,6 +14,43 @@ namespace {
 
 constexpr size_t k_align = 4096; // O_DIRECT alignment for both buffer address and I/O size
 
+// Linux caps a single read()/write() at 0x7ffff000 (~2 GiB) and returns a short count past that,
+// which the callers below treat as a hard failure -- silently dropping any snapshot larger than
+// ~2 GiB (readily reached by a full-state snapshot of a large model at a high token boundary).
+// Issue I/O in aligned sub-2-GiB chunks so multi-GiB blobs round-trip. 1 GiB is 4096-aligned, so
+// every intermediate offset/length stays O_DIRECT-aligned; only the final read may legitimately
+// stop short at EOF.
+constexpr size_t k_io_chunk = 1ull << 30; // 1 GiB
+
+// Returns true iff all `n` bytes were written. Loops to satisfy partial writes / the ~2 GiB cap.
+static bool write_all(int fd, const uint8_t * p, size_t n) {
+    size_t off = 0;
+    while (off < n) {
+        const size_t want = std::min(k_io_chunk, n - off);
+        const ssize_t w = write(fd, p + off, want);
+        if (w <= 0) {
+            return false;
+        }
+        off += (size_t) w;
+    }
+    return true;
+}
+
+// Reads until `real_size` bytes have been consumed or EOF. `buf_size` (>= real_size, 4096-aligned)
+// bounds each aligned request; a short read is only acceptable once `off` has reached real_size.
+static bool read_all(int fd, uint8_t * p, size_t buf_size, size_t real_size) {
+    size_t off = 0;
+    while (off < real_size) {
+        const size_t want = std::min(k_io_chunk, buf_size - off);
+        const ssize_t r = read(fd, p + off, want);
+        if (r <= 0) {
+            return false;
+        }
+        off += (size_t) r;
+    }
+    return true;
+}
+
 std::string key_to_filename(const chunk_key & key) {
     std::ostringstream oss;
     oss << key.weights_fingerprint << "-" << std::hex << std::setw(16) << std::setfill('0') << key.content_hash << ".bin";
@@ -85,9 +122,9 @@ public:
         // expected/relied-upon, not an error. This is Linux-specific behavior (not
         // guaranteed on all filesystems, e.g. some network filesystems), which is why
         // we still check `n < st.st_size` below rather than assuming a full read.
-        ssize_t n = read(fd, buf.ptr, buf.size);
+        const bool ok = read_all(fd, buf.ptr, buf.size, (size_t) st.st_size);
         close(fd);
-        if (n < (ssize_t) st.st_size) {
+        if (!ok) {
             return false;
         }
 
@@ -129,9 +166,9 @@ public:
         if (fd < 0) {
             return;
         }
-        ssize_t written = write(fd, buf.ptr, buf.size);
+        const bool written_ok = write_all(fd, buf.ptr, buf.size);
         close(fd);
-        if (written < (ssize_t) buf.size) {
+        if (!written_ok) {
             unlink(tmp_path.c_str());
             return;
         }
