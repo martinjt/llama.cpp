@@ -1970,6 +1970,62 @@ Response:
 }
 ```
 
+## Content-addressed chunk cache
+
+An opt-in, content-addressed prefix cache that persists full model state (attention KV **and**
+recurrent/SSM state, for hybrid architectures) across requests — including across a full server
+restart. This is separate from the existing per-slot prompt cache (`--slot-save-path` /
+`/slots/{id_slot}?action=save|restore`), which is scoped to a single slot and doesn't survive that
+slot being evicted or the process restarting. The chunk cache is disabled by default; nothing
+changes unless it's explicitly enabled with `--chunk-cache-backend`.
+
+### How it works
+
+While processing a prompt, the server periodically captures a full-state snapshot of a request's
+KV/recurrent state, keyed by a hash of the model's weights fingerprint plus the token prefix
+processed so far. A snapshot is captured once the number of prompt tokens processed crosses a
+`--chunk-cache-snapshot-step` boundary (default: 16384 tokens) — so very short prompts (e.g. a
+5–8k-token system prompt on its own) may never trigger a snapshot; caching benefit appears once a
+conversation's *total* length first exceeds the configured step.
+
+On a future request, if an exact-prefix match is found in the cache, the corresponding snapshot is
+restored (from RAM, disk, or a remote LMCache server, depending on backend) instead of recomputing
+that portion of the prompt from scratch — even if the original request was served by a different
+slot, or before a server restart.
+
+**Known limitation on hybrid (attention + recurrent/SSM, e.g. Gated Delta Net) architectures:**
+generation after a cache restore is not guaranteed to be bit-exact against a cold recompute of the
+same prompt. This class of architecture is documented elsewhere (e.g. vLLM/LMCache) as not
+batch-invariant — small floating-point differences between different batch-composition paths can
+occasionally change a near-tied greedy-decoding choice. Observed divergences during validation were
+overwhelmingly cosmetic (different phrasing of the same response) rather than a functional failure,
+but this has not been exhaustively characterized across many trials — treat cache hits on hybrid
+models as "very likely equivalent, not proven bit-identical" until further validated.
+
+### CLI flags
+
+| Flag | Description |
+|---|---|
+| `--chunk-cache-backend BACKEND` | `ram`, `disk`, or `lmcache`. Omit to leave the feature disabled (default). |
+| `--chunk-cache-path PATH` | A directory for the `disk` backend, or `host:port` for the `lmcache` backend. |
+| `--chunk-cache-ram-mib N` | Size limit in MiB for the `ram` backend's cache. |
+| `--chunk-cache-disk-quota-mib N` | Size limit in MiB for the `disk` backend's cache. Enforced via LRU eviction (oldest-touched entries evicted first) on every write — the cache directory will not grow past this quota. There is no time-based expiry; entries live until evicted by the quota. |
+| `--chunk-cache-snapshot-step N` | Token interval between full-state snapshots (default: 16384). Smaller values snapshot more granularly (more disk/RAM writes, finer-grained reuse); larger values snapshot less often (fewer writes, coarser reuse, more tokens re-processed on a partial-prefix match). |
+
+Each backend keys cache entries by `(model weights fingerprint, content hash of the token prefix)`,
+so switching models or model weights never returns a stale hit from a different model. A cache
+entry is also specific to the KV-cache topology (`kv_unified` on/off, `--parallel` slot count) it
+was captured under — restoring a snapshot into a server running with a different topology is a
+safe, silent cache miss (falls back to a cold recompute), not an error.
+
+### Per-request opt-out
+
+Send the `x-chunk-cache: off` HTTP header (case-insensitive, on both the header name and the `off`
+value) on an individual `/completion` or chat-completions request to bypass the chunk cache
+entirely for that request — no snapshot lookup, no snapshot capture. Useful for benchmarking a cold
+path, or for a caller that has its own reason to avoid this request affecting or being affected by
+the shared cache. All other requests continue to use the cache normally.
+
 ## API errors
 
 `llama-server` returns errors in the same format as OAI: https://github.com/openai/openai-openapi
