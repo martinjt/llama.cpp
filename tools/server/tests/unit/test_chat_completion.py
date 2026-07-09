@@ -71,6 +71,7 @@ def test_chat_completion_cached_tokens():
         })
         assert res.body["usage"]["prompt_tokens"] == n_prompt
         assert res.body["usage"]["prompt_tokens_details"]["cached_tokens"] == n_cache
+        assert res.body["usage"]["prompt_tokens_details"]["cache_write_tokens"] == n_prompt - n_cache
 
 @pytest.mark.parametrize(
     "system_prompt,user_prompt,max_tokens,re_content,n_prompt,n_predicted,finish_reason",

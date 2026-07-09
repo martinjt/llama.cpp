@@ -391,7 +391,10 @@ json server_task_result_cmpl_final::usage_json_oaicompat() {
         {"completion_tokens", n_decoded},
         {"prompt_tokens",     n_prompt_tokens},
         {"total_tokens",      n_decoded + n_prompt_tokens},
-        {"prompt_tokens_details", json { {"cached_tokens", n_prompt_tokens_cache} }},
+        {"prompt_tokens_details", json {
+            {"cached_tokens", n_prompt_tokens_cache},
+            {"cache_write_tokens", n_prompt_tokens - n_prompt_tokens_cache},
+        }},
     };
 }
 
