@@ -262,6 +262,14 @@ struct server_task {
 struct result_timings {
     int32_t cache_n = -1;
 
+    // chunk-cache diagnostics (see server_slot::chunk_cache_* in server-context.cpp),
+    // carried through to otel_span_attrs for Honeycomb visibility.
+    bool        chunk_cache_attempted        = false;
+    bool        chunk_cache_hit              = false;
+    int32_t     chunk_cache_restored_tokens  = 0;
+    int32_t     chunk_cache_largest_boundary = 0;
+    std::string chunk_cache_path;
+
     int32_t prompt_n = -1;
     double prompt_ms = 0.0;
     double prompt_per_token_ms = 0.0;

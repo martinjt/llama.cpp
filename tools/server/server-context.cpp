@@ -220,6 +220,15 @@ struct server_slot {
     int32_t n_prompt_tokens_cache     = 0;
     int32_t n_prompt_tokens_processed = 0;
 
+    // chunk-cache diagnostics for this request, surfaced as OTel span attributes
+    // (see otel_end_span call sites) -- lets Honeycomb answer "did chunk-cache even
+    // get consulted, and if so why didn't it hit" without grepping server logs.
+    bool        chunk_cache_attempted        = false;
+    bool        chunk_cache_hit              = false;
+    int32_t     chunk_cache_restored_tokens  = 0;
+    int32_t     chunk_cache_largest_boundary = 0; // longest boundary/chunk-depth checked
+    std::string chunk_cache_path;                 // "snapshot" or "range"
+
     size_t last_nl_pos = 0;
 
     std::string  generated_text;
@@ -327,6 +336,12 @@ struct server_slot {
         SLT_DBG(*this, "%s", "\n");
 
         n_prompt_tokens_cache = 0;
+
+        chunk_cache_attempted        = false;
+        chunk_cache_hit              = false;
+        chunk_cache_restored_tokens  = 0;
+        chunk_cache_largest_boundary = 0;
+        chunk_cache_path.clear();
 
         last_nl_pos    = 0;
         generated_text = "";
@@ -531,6 +546,12 @@ struct server_slot {
     result_timings get_timings() const {
         result_timings timings;
         timings.cache_n = n_prompt_tokens_cache;
+
+        timings.chunk_cache_attempted        = chunk_cache_attempted;
+        timings.chunk_cache_hit              = chunk_cache_hit;
+        timings.chunk_cache_restored_tokens  = chunk_cache_restored_tokens;
+        timings.chunk_cache_largest_boundary = chunk_cache_largest_boundary;
+        timings.chunk_cache_path             = chunk_cache_path;
 
         timings.prompt_n            = n_prompt_tokens_processed;
         timings.prompt_ms           = t_prompt_processing;
@@ -1777,6 +1798,8 @@ private:
             const llama_tokens & req_tokens = task.tokens.get_text_tokens();
             const size_t cur_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
 
+            ret->chunk_cache_attempted = true;
+
             if (model_supports_range_cache(ctx_tgt)) {
                 // secondary range-chunk path: walk the chunk chain from the start, restoring
                 // each hit's KV range independently. the chain is content-addressed (each
@@ -1800,6 +1823,9 @@ private:
                 // previously claimed the opposite, that cells had to pre-exist).
                 const auto chain = compute_chunk_chain(req_tokens, weights_fingerprint, CHUNK_CACHE_RANGE_CHUNK_SIZE);
 
+                ret->chunk_cache_path            = "range";
+                ret->chunk_cache_largest_boundary = (int32_t) (chain.size() * CHUNK_CACHE_RANGE_CHUNK_SIZE);
+
                 size_t n_restored = 0;
                 bool failed = false;
                 for (const auto & c : chain) {
@@ -1807,6 +1833,8 @@ private:
 
                     std::vector<uint8_t> blob;
                     if (!chunk_cache->get(key, blob)) {
+                        SLT_TRC(*ret, "range chunk cache: miss at chunk_index=%zu (hash=%016" PRIx64 ")\n",
+                                c.chunk_index, (uint64_t) c.chunk_hash);
                         break; // content-addressed chain: first miss ends reuse
                     }
 
@@ -1847,12 +1875,18 @@ private:
                     ret->prompt.tokens.keep_first(n_restored);
                     ret->prompt.checkpoints.clear();
 
+                    ret->chunk_cache_hit             = true;
+                    ret->chunk_cache_restored_tokens = (int32_t) n_restored;
+
                     SLT_INF(*ret, "range chunk cache: restored chunk chain, prefix n=%zu tokens\n", n_restored);
                 }
             } else {
                 // primary snapshot path (Task 13): a single whole-sequence, content-hash-keyed
                 // full-state snapshot, at chunk_cache_snapshot_step-aligned prefix lengths.
                 const size_t step = (size_t) params_base.chunk_cache_snapshot_step;
+
+                ret->chunk_cache_path            = "snapshot";
+                ret->chunk_cache_largest_boundary = (int32_t) ((task.tokens.size() / step) * step);
 
                 // walk step-aligned prefix lengths from longest to shortest, restoring the first
                 // (longest) snapshot that exists and beats what the slot already holds.
@@ -1861,6 +1895,7 @@ private:
 
                     std::vector<uint8_t> blob;
                     if (!chunk_cache->get(key, blob)) {
+                        SLT_TRC(*ret, "chunk cache: miss at n=%zu (hash=%016" PRIx64 ")\n", n, key.content_hash);
                         continue;
                     }
 
@@ -1881,6 +1916,9 @@ private:
                     ret->prompt.tokens = task.tokens.clone();
                     ret->prompt.tokens.keep_first(n);
                     ret->prompt.checkpoints.clear();
+
+                    ret->chunk_cache_hit             = true;
+                    ret->chunk_cache_restored_tokens = (int32_t) n;
 
                     SLT_INF(*ret, "chunk cache: restored full-state snapshot, prefix n=%zu tokens\n", n);
                     break;
@@ -4516,6 +4554,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         .cache_tokens     = final_res->timings.cache_n,
                         .finish_reason    = stop_reason,
                         .operation_name   = otel_op_name,
+                        .chunk_cache_attempted        = final_res->timings.chunk_cache_attempted,
+                        .chunk_cache_hit              = final_res->timings.chunk_cache_hit,
+                        .chunk_cache_restored_tokens  = final_res->timings.chunk_cache_restored_tokens,
+                        .chunk_cache_largest_boundary = final_res->timings.chunk_cache_largest_boundary,
+                        .chunk_cache_path             = final_res->timings.chunk_cache_path,
                     });
                 }
             }
@@ -4690,6 +4733,11 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                             .cache_tokens     = final_res->timings.cache_n,
                             .finish_reason    = stop_reason,
                             .operation_name   = otel_op_captured,
+                            .chunk_cache_attempted        = final_res->timings.chunk_cache_attempted,
+                            .chunk_cache_hit              = final_res->timings.chunk_cache_hit,
+                            .chunk_cache_restored_tokens  = final_res->timings.chunk_cache_restored_tokens,
+                            .chunk_cache_largest_boundary = final_res->timings.chunk_cache_largest_boundary,
+                            .chunk_cache_path             = final_res->timings.chunk_cache_path,
                         });
                     }
                     json res_json = result->to_json();

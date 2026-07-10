@@ -190,6 +190,22 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
         s->SetAttribute("gen_ai.usage.cache_read.input_tokens", static_cast<int64_t>(attrs.cache_tokens));
     }
 
+    // chunk-cache diagnostics: only meaningful once the restore logic actually ran
+    // (excluded for multimodal / opted-out requests, or if chunk_cache isn't configured).
+    if (attrs.chunk_cache_attempted) {
+        s->SetAttribute("chunk_cache.attempted", true);
+        s->SetAttribute("chunk_cache.hit", attrs.chunk_cache_hit);
+        if (!attrs.chunk_cache_path.empty()) {
+            s->SetAttribute("chunk_cache.path", attrs.chunk_cache_path);
+        }
+        if (attrs.chunk_cache_restored_tokens >= 0) {
+            s->SetAttribute("chunk_cache.restored_tokens", static_cast<int64_t>(attrs.chunk_cache_restored_tokens));
+        }
+        if (attrs.chunk_cache_largest_boundary >= 0) {
+            s->SetAttribute("chunk_cache.largest_boundary_tried", static_cast<int64_t>(attrs.chunk_cache_largest_boundary));
+        }
+    }
+
     // finish_reasons must be an array per semconv; use nostd::span for AttributeValue compatibility
     if (!attrs.finish_reason.empty()) {
         opentelemetry::nostd::string_view reasons[] = {

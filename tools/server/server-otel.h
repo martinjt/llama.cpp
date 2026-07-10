@@ -18,6 +18,15 @@ struct otel_span_attrs {
     std::string operation_name = "chat";
     bool is_error = false;
     std::string error_message;
+
+    // chunk-cache diagnostics (see server_slot::chunk_cache_* / result_timings in
+    // server-context.cpp) -- answers "was the disk/RAM chunk-cache even consulted for
+    // this request, and if so did it hit" directly from the span in Honeycomb.
+    bool        chunk_cache_attempted        = false;
+    bool        chunk_cache_hit              = false;
+    int32_t     chunk_cache_restored_tokens  = -1;
+    int32_t     chunk_cache_largest_boundary = -1;
+    std::string chunk_cache_path;
 };
 
 #ifdef LLAMA_OTEL
