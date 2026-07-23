@@ -4107,6 +4107,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.message_spans = task.tokens.find_message_spans(delimiters);
 
             task.id_slot = json_value(data, "id_slot", -1);
+            if (task.id_slot == -1) {
+                auto it = req.headers.find("x-slot-id");
+                if (it != req.headers.end() && !it->second.empty()) {
+                    try { task.id_slot = std::stoi(it->second); } catch (...) {}
+                }
+            }
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat
