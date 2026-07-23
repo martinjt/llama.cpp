@@ -431,22 +431,23 @@ common_peg_parser analyze_tools::build_tool_parser_tag_tagged(parser_build_conte
             }
         }
 
-        // Build required arg sequence in definition order
+        // Build a single flexible pool: required and optional params may appear in
+        // any order. <parameter= is multi-token in Qwen3.6, so generation-time
+        // grammar cannot enforce param ordering; the post-generation parser must
+        // accept any order too, or reordered required params fail to match. The
+        // required/optional split above is retained only for atomic_peek gating
+        // below (#20650).
         common_peg_parser args_seq = p.eps();
-        for (size_t i = 0; i < required_parsers.size(); i++) {
-            if (i > 0) {
-                args_seq = args_seq + p.space();
+        {
+            std::vector<common_peg_parser> all_parsers = required_parsers;
+            all_parsers.insert(all_parsers.end(), optional_parsers.begin(), optional_parsers.end());
+            if (!all_parsers.empty()) {
+                common_peg_parser any_param = p.choice();
+                for (const auto & param : all_parsers) {
+                    any_param |= param;
+                }
+                args_seq = args_seq + p.repeat(p.space() + any_param, 0, -1);
             }
-            args_seq = args_seq + required_parsers[i];
-        }
-
-        // Build optional args with flexible ordering
-        if (!optional_parsers.empty()) {
-            common_peg_parser any_opt = p.choice();
-            for (const auto & opt : optional_parsers) {
-                any_opt |= opt;
-            }
-            args_seq = args_seq + p.repeat(p.space() + any_opt, 0, -1);
         }
 
         if (!arguments.start.empty()) {
