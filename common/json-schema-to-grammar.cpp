@@ -837,6 +837,15 @@ public:
     }
 
     std::string visit(const json & schema, const std::string & name) {
+        if (schema.is_boolean()) {
+            std::string rule_name = is_reserved_name(name) ? name + "-" : name.empty() ? "root" : name;
+            if (schema.get<bool>()) {
+                return _add_rule(rule_name, _add_primitive("value", PRIMITIVE_RULES.at("value")));
+            } else {
+                _errors.push_back("Unrecognized schema: " + schema.dump());
+                return "";
+            }
+        }
         json schema_type = schema.contains("type") ? schema["type"] : json();
         std::string schema_format = schema.contains("format") ? schema["format"].get<std::string>() : "";
         std::string rule_name = is_reserved_name(name) ? name + "-" : name.empty() ? "root" : name;
