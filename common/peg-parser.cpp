@@ -884,7 +884,9 @@ struct parser_executor {
 
         if (!result.fail()) {
             std::string_view text;
-            if (result.start < ctx.input.size()) {
+            if (!p.override_text.empty()) {
+                text = std::string_view(p.override_text);
+            } else if (result.start < ctx.input.size()) {
                 text = std::string_view(ctx.input).substr(result.start, result.end - result.start);
             }
 
@@ -2180,6 +2182,7 @@ static common_peg_parser_variant deserialize_parser_variant(const nlohmann::json
         return common_peg_tag_parser{
             j["child"].get<common_peg_parser_id>(),
             j["tag"].get<std::string>(),
+            j.value("override_text", std::string{}),
         };
     }
 

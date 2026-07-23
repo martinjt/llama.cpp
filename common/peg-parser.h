@@ -268,6 +268,7 @@ struct common_peg_atomic_parser {
 struct common_peg_tag_parser {
     common_peg_parser_id child;
     std::string tag;
+    std::string override_text;  // If non-empty, emitted as node text instead of matched input
 };
 
 struct common_peg_gbnf_parser {
@@ -514,7 +515,8 @@ class common_peg_parser_builder {
 
     // Tags create nodes in the generated AST for semantic purposes.
     // Unlike rules, you can tag multiple nodes with the same tag.
-    common_peg_parser tag(const std::string & tag, const common_peg_parser & p) { return add(common_peg_tag_parser{p.id(), tag}); }
+    common_peg_parser tag(const std::string & tag, const common_peg_parser & p) { return add(common_peg_tag_parser{p.id(), tag, {}}); }
+    common_peg_parser tag_with_override(const std::string & tag_name, const common_peg_parser & p, const std::string & override) { return add(common_peg_tag_parser{p.id(), tag_name, override}); }
 
     // Wraps a child parser but emits a custom GBNF grammar string instead of
     // the child's grammar. Parsing delegates entirely to the child.

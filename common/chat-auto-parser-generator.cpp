@@ -260,7 +260,16 @@ common_peg_parser analyze_tools::build_func_parser(common_chat_peg_builder & p, 
                                                     const common_peg_parser & call_id_section, bool have_call_id,
                                                     const common_peg_parser & args,
                                                     std::optional<common_peg_parser> atomic_peek) const {
-    auto              open           = p.tool_open(function.name_prefix + p.tool_name(p.literal(name)) + function.name_suffix);
+    // Accept both canonical name and hyphenated form (e.g. webfetch and web-fetch,
+    // web_fetch and web-fetch) — Qwen3.6 can generate hyphenated names via preserved
+    // tokens even when the schema uses underscores or no separator. The override emits the
+    // canonical (schema) name regardless of which form matched.
+    std::string hyphen_name = name;
+    std::replace(hyphen_name.begin(), hyphen_name.end(), '_', '-');
+    common_peg_parser name_matcher = (hyphen_name != name)
+        ? p.choice({p.tool_name(p.literal(name)), p.tool_name_override(p.literal(hyphen_name), name)})
+        : p.tool_name(p.literal(name));
+    auto              open           = p.tool_open(function.name_prefix + name_matcher + function.name_suffix);
     bool              matched_atomic = false;
     common_peg_parser func_parser    = p.eps();
 

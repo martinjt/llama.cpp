@@ -81,6 +81,8 @@ class common_chat_peg_builder : public common_peg_parser_builder {
     common_peg_parser tool_close(const common_peg_parser & p) { return atomic(tag(TOOL_CLOSE, p)); }
     common_peg_parser tool_id(const common_peg_parser & p) { return atomic(tag(TOOL_ID, p)); }
     common_peg_parser tool_name(const common_peg_parser & p) { return atomic(tag(TOOL_NAME, p)); }
+    // Match p in the input but emit canonical_name as the tool name (for hyphen/underscore normalization)
+    common_peg_parser tool_name_override(const common_peg_parser & p, const std::string & canonical_name) { return atomic(tag_with_override(TOOL_NAME, p, canonical_name)); }
     common_peg_parser tool_args(const common_peg_parser & p) { return tag(TOOL_ARGS, p); }
     common_peg_parser tool_arg(const common_peg_parser & p) { return tag(TOOL_ARG, p); }
     common_peg_parser tool_arg_open(const common_peg_parser & p) { return atomic(tag(TOOL_ARG_OPEN, p)); }
