@@ -190,6 +190,10 @@ void otel_end_span(otel_span * span, const otel_span_attrs & attrs) {
         s->SetAttribute("gen_ai.usage.cache_read.input_tokens", static_cast<int64_t>(attrs.cache_tokens));
     }
 
+    if (attrs.slot_id >= 0) {
+        s->SetAttribute("llama.slot_id", static_cast<int64_t>(attrs.slot_id));
+    }
+
     // finish_reasons must be an array per semconv; use nostd::span for AttributeValue compatibility
     if (!attrs.finish_reason.empty()) {
         opentelemetry::nostd::string_view reasons[] = {

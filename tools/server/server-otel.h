@@ -18,6 +18,7 @@ struct otel_span_attrs {
     std::string operation_name = "chat";
     bool is_error = false;
     std::string error_message;
+    int32_t slot_id = -1;
 };
 
 #ifdef LLAMA_OTEL
