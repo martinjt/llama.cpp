@@ -5,6 +5,10 @@
 #include "server-stream.h"
 #include "server-tools.h"
 
+#ifdef LLAMA_OTEL
+#include "server-otel.h"
+#endif
+
 #include "arg.h"
 #include "build-info.h"
 #include "common.h"
@@ -92,6 +96,11 @@ int llama_server(int argc, char ** argv) {
     common_params params;
 
     common_init();
+
+#ifdef LLAMA_OTEL
+    otel_init();
+    LOG_INF("%s: OpenTelemetry tracing enabled\n", __func__);
+#endif
 
     // start the stream session manager GC right after common init, before any HTTP route can
     // touch it. lifecycle is symmetric, stop_gc() runs in clean_up() before backend free
@@ -380,6 +389,9 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
         clean_up = [&models_routes]() {
             SRV_INF("%s: cleaning up before exit...\n", __func__);
+#ifdef LLAMA_OTEL
+            otel_shutdown();
+#endif
             // stop the session GC first, it finalizes live sessions and wakes pending readers
             server_stream_session_manager_stop();
             if (models_routes.has_value()) {
@@ -408,6 +420,9 @@ int llama_server(common_params & params, int argc, char ** argv) {
         // setup clean up function, to be called before exit
         clean_up = [&ctx_http, &ctx_server]() {
             SRV_INF("%s: cleaning up before exit...\n", __func__);
+#ifdef LLAMA_OTEL
+            otel_shutdown();
+#endif
             // stop the session GC first, it finalizes live sessions and wakes pending readers
             server_stream_session_manager_stop();
             ctx_http.stop();
